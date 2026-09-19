@@ -1,0 +1,1276 @@
+openapi: 3.1.0
+info:
+  title: straycatz API
+  version: 0.1.0
+  summary: HTTP-контракт фронта straycatz
+  description: |
+    Контракт снят с работающего фронта: все поля здесь реально используются
+    на экранах, лишнего нет. Фронт ходит в этот API через один фасад
+    (`src/lib/api/`), поэтому переключение с моков на настоящий сервер —
+    это одна переменная окружения, а не переписывание экранов.
+
+    Общие правила:
+
+    * Все ответы `application/json; charset=utf-8`, тела в camelCase.
+    * Ошибки — `application/problem+json` по RFC 9457.
+    * Списки листаются курсором: `?cursor=&limit=`, в ответе `nextCursor`.
+      Курсор непрозрачный, сервер волен менять его формат.
+    * Время — ISO 8601 с зоной. Человекочитаемое «14 минут назад» считает
+      фронт, сервер отдаёт машинное.
+    * Идемпотентность создающих запросов — заголовок `Idempotency-Key`
+      (для сообщений дополнительно `clientToken` в теле).
+    * Картинки живут блобами: `POST /media` отдаёт id, дальше везде
+      передаётся `mediaId`, а картинка забирается через `GET /media/{id}`.
+
+    Раздел видео сознательно не специфицирован: продуктово он ещё не решён.
+    Клипы пока приходят только в ленту как элемент `clip` с уже готовым
+    payload, чего достаточно, чтобы не блокировать остальное.
+servers:
+  - url: https://api.straycatz.example/v1
+    description: прод
+  - url: http://localhost:8080/v1
+    description: локальный Quarkus
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Сессия
+  - name: Люди и присутствие
+  - name: Комнаты
+  - name: Сообщества
+  - name: Записи
+  - name: Обсуждения и события
+  - name: Лента
+  - name: Музыка
+  - name: Беседы
+  - name: Медиа
+
+paths:
+  # ------------------------------------------------------------- сессия
+  /auth/session:
+    post:
+      tags: [Сессия]
+      summary: Войти и получить токен
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [handle, password]
+              properties:
+                handle: { type: string }
+                password: { type: string, format: password }
+      responses:
+        '200':
+          description: Токен и профиль
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '401': { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [Сессия]
+      summary: Выйти
+      responses:
+        '204': { description: Вышли }
+
+  # ------------------------------------------------- люди и присутствие
+  /me:
+    get:
+      tags: [Люди и присутствие]
+      summary: Свой профиль вместе с присутствием
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+    patch:
+      tags: [Люди и присутствие]
+      summary: Поменять статус, настроение, подпись
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { $ref: '#/components/schemas/Status' }
+                mood: { type: string, maxLength: 140 }
+                tagline: { type: string, maxLength: 140 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+
+  /me/friends:
+    get:
+      tags: [Люди и присутствие]
+      summary: Друзья с присутствием
+      description: |
+        Основной источник для списка справа и для «слушают вместе».
+        Невидимки возвращаются со `status: invisible` без `doing` и `listening`.
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Person' }
+
+  /users/{handle}:
+    get:
+      tags: [Люди и присутствие]
+      summary: Чужой профиль
+      parameters: [{ $ref: '#/components/parameters/Handle' }]
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Person' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  # ---------------------------------------------------------- комнаты
+  /rooms:
+    get:
+      tags: [Комнаты]
+      summary: Комнаты, куда можно зайти
+      parameters:
+        - { name: open, in: query, schema: { type: boolean, default: true } }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/RoomCard' }
+
+  /rooms/{handle}:
+    get:
+      tags: [Комнаты]
+      summary: Комната целиком — раскладка, обои, словарь
+      parameters: [{ $ref: '#/components/parameters/Handle' }]
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Room' }
+        '403':
+          description: Комната заперта хозяином
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /me/room:
+    put:
+      tags: [Комнаты]
+      summary: Сохранить свою комнату
+      description: |
+        Полная замена конфигурации. `backdropDim` меньше 0.25 сервер обязан
+        поднять до 0.25 — читаемость чужого текста это не вкусовщина, а
+        гарантия платформы, и держать её только на клиенте нельзя.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RoomConfig' }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Room' }
+        '422': { $ref: '#/components/responses/Problem' }
+
+  /rooms/{handle}/guestbook:
+    get:
+      tags: [Комнаты]
+      summary: Записи в гостевой
+      parameters:
+        - { $ref: '#/components/parameters/Handle' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/GuestbookEntry' }
+    post:
+      tags: [Комнаты]
+      summary: Расписаться в гостевой
+      parameters: [{ $ref: '#/components/parameters/Handle' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string, maxLength: 600 }
+      responses:
+        '201':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GuestbookEntry' }
+        '429': { $ref: '#/components/responses/Problem' }
+
+  # -------------------------------------------------------- сообщества
+  /communities:
+    get:
+      tags: [Сообщества]
+      summary: Список сообществ
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: mine, in: query, schema: { type: boolean } }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/CommunityCard' }
+
+  /communities/{slug}:
+    get:
+      tags: [Сообщества]
+      summary: Сообщество со всем, что рисует страница
+      description: Разделы, правила, модераторы, словарь и свежий журнал.
+      parameters: [{ $ref: '#/components/parameters/Slug' }]
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Community' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /communities/{slug}/membership:
+    put:
+      tags: [Сообщества]
+      summary: Вступить
+      parameters: [{ $ref: '#/components/parameters/Slug' }]
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Membership' }
+    delete:
+      tags: [Сообщества]
+      summary: Выйти
+      parameters: [{ $ref: '#/components/parameters/Slug' }]
+      responses:
+        '204': { description: Вышли }
+
+  /communities/{slug}/lexicon:
+    put:
+      tags: [Сообщества]
+      summary: Поменять язык сообщества
+      description: |
+        Доступно модераторам. Ключи фиксированы кодом, значение обрезается
+        до 22 символов. Неизвестный ключ — 422, а не тихое игнорирование:
+        иначе фронт и сервер разъедутся незаметно.
+      parameters: [{ $ref: '#/components/parameters/Slug' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LexiconPayload' }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LexiconPayload' }
+        '403': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+
+  /communities/{slug}/modlog:
+    get:
+      tags: [Сообщества]
+      summary: Журнал модерации
+      description: Открыт всем, а не только модераторам. Это часть продукта.
+      parameters:
+        - { $ref: '#/components/parameters/Slug' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/ModlogEntry' }
+
+  # ------------------------------------------------------------ записи
+  /communities/{slug}/posts:
+    get:
+      tags: [Записи]
+      summary: Записи сообщества
+      parameters:
+        - { $ref: '#/components/parameters/Slug' }
+        - { $ref: '#/components/parameters/Sort' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Post' }
+    post:
+      tags: [Записи]
+      summary: Написать в сообщество
+      parameters: [{ $ref: '#/components/parameters/Slug' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PostDraft' }
+      responses:
+        '201':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Post' }
+
+  /pulse:
+    get:
+      tags: [Записи]
+      summary: Пульс — короткое со всей сети
+      description: |
+        Сортировки называются человеческим языком и считаются просто:
+        `hot` — активность за последний час, `new` — время, `friends` —
+        только друзья, `week` — отклики за семь дней. Скрытого веса нет,
+        и это продуктовое требование, а не недоработка.
+      parameters:
+        - { $ref: '#/components/parameters/Sort' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Post' }
+
+  /posts/{id}/vote:
+    put:
+      tags: [Записи]
+      summary: Поддержать запись
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties:
+                value: { type: integer, enum: [-1, 0, 1] }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  score: { type: integer }
+                  myVote: { type: integer }
+
+  /posts/{id}/comments:
+    get:
+      tags: [Записи]
+      summary: Ответы под записью
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Comment' }
+    post:
+      tags: [Записи]
+      summary: Ответить
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string, maxLength: 4000 }
+                parentId: { type: string, format: uuid }
+      responses:
+        '201':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Comment' }
+
+  # ------------------------------------------ обсуждения и события
+  /communities/{slug}/threads:
+    get:
+      tags: [Обсуждения и события]
+      summary: Обсуждения сообщества
+      parameters:
+        - { $ref: '#/components/parameters/Slug' }
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/Thread' }
+
+  /communities/{slug}/events:
+    get:
+      tags: [Обсуждения и события]
+      summary: Сборы и даты
+      parameters: [{ $ref: '#/components/parameters/Slug' }]
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Event' }
+
+  /events/{id}/rsvp:
+    put:
+      tags: [Обсуждения и события]
+      summary: Отметиться, что придёшь
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Event' }
+
+  /polls/{id}/vote:
+    put:
+      tags: [Обсуждения и события]
+      summary: Проголосовать
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties:
+                value: { type: boolean }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Poll' }
+
+  # ------------------------------------------------------------- лента
+  /feed:
+    get:
+      tags: [Лента]
+      summary: Консолидированная лента
+      description: |
+        Строго хронологический список. Источники выключаются на клиенте
+        тумблерами и приезжают сюда как `sources`. Сервер не перемешивает
+        и не ранжирует: порядок по `createdAt` убывающе, точка.
+
+        Каждый элемент приходит уже с раскрытым содержимым (`post`, `clip`
+        и так далее), чтобы фронт не делал N дополнительных запросов.
+      parameters:
+        - name: sources
+          in: query
+          description: Через запятую. По умолчанию все.
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/FeedSource' }
+          style: form
+          explode: false
+        - { $ref: '#/components/parameters/Cursor' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/FeedItem' }
+
+  /nexus:
+    get:
+      tags: [Лента]
+      summary: Данные главной
+      description: |
+        Один запрос на весь экран входа: счётчики для плиток, свежая
+        активность и «что произошло, пока тебя не было». Собирать это
+        шестью запросами смысла нет — экран всё равно рисуется целиком.
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Nexus' }
+
+  /trending:
+    get:
+      tags: [Лента]
+      summary: О чём говорят
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Topic' }
+
+  # ------------------------------------------------------------ музыка
+  /music/library:
+    get:
+      tags: [Музыка]
+      summary: Что можно включить
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Track' }
+
+  /music/together:
+    get:
+      tags: [Музыка]
+      summary: Кто слушает то же самое
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Listener' }
+
+  /me/presence/music:
+    put:
+      tags: [Музыка]
+      summary: Сказать сети, что у тебя играет
+      description: |
+        Вызывается на старте трека и раз в тридцать секунд. Присутствие
+        по музыке разъезжается через WebSocket (`presence.changed`),
+        поэтому отдельного опроса друзьям не нужно.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                trackId: { type: string, format: uuid, nullable: true }
+                positionSec: { type: integer }
+      responses:
+        '204': { description: Принято }
+
+  /artists/{slug}:
+    get:
+      tags: [Музыка]
+      summary: Артист как объект со своими разделами
+      parameters: [{ $ref: '#/components/parameters/Slug' }]
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Artist' }
+
+  # ------------------------------------------------------------ беседы
+  /chats:
+    get:
+      tags: [Беседы]
+      summary: Список бесед с непрочитанным
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ChatSummary' }
+
+  /chats/{id}/messages:
+    get:
+      tags: [Беседы]
+      summary: История беседы
+      description: |
+        Листается по `seq` назад: `?before=<seq>&limit=`. Живые сообщения
+        приходят по сокету, HTTP нужен только для истории и для догрузки
+        после разрыва связи.
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { name: before, in: query, schema: { type: integer, format: int64 } }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Message' }
+                  hasMore: { type: boolean }
+    post:
+      tags: [Беседы]
+      summary: Отправить сообщение (запасной путь без сокета)
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MessageDraft' }
+      responses:
+        '201':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
+
+  /chats/{id}/read:
+    put:
+      tags: [Беседы]
+      summary: Отметить прочитанным до seq
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [seq]
+              properties:
+                seq: { type: integer, format: int64 }
+      responses:
+        '204': { description: Принято }
+
+  # ------------------------------------------------------------- медиа
+  /media:
+    post:
+      tags: [Медиа]
+      summary: Загрузить картинку
+      description: |
+        Пока храним блобами в базе. Ограничения проверяет сервер:
+        до 5 МБ, image/png|jpeg|gif|webp, сторона до 4096 px. Одинаковые
+        файлы схлопываются по sha256 и возвращают тот же id.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+                purpose:
+                  type: string
+                  enum: [backdrop, post, message, avatar]
+      responses:
+        '201':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Media' }
+        '413': { $ref: '#/components/responses/Problem' }
+        '415': { $ref: '#/components/responses/Problem' }
+
+  /media/{id}:
+    get:
+      tags: [Медиа]
+      summary: Забрать картинку
+      description: Отдаётся с ETag и `Cache-Control типа public, max-age=31536000, immutable`.
+      security: []
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: Байты
+          content:
+            image/*:
+              schema: { type: string, format: binary }
+        '404': { $ref: '#/components/responses/Problem' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    Handle:
+      name: handle
+      in: path
+      required: true
+      schema: { type: string }
+    Slug:
+      name: slug
+      in: path
+      required: true
+      schema: { type: string }
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+    Sort:
+      name: sort
+      in: query
+      schema:
+        type: string
+        enum: [hot, new, friends, week]
+        default: hot
+
+  responses:
+    Problem:
+      description: Ошибка
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    Problem:
+      type: object
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        errors:
+          type: object
+          additionalProperties: { type: string }
+
+    Page:
+      type: object
+      properties:
+        nextCursor: { type: string, nullable: true }
+        # Признак «новое кончилось»: фронт рисует по нему честный конец ленты,
+        # а не крутилку до бесконечности.
+        exhausted: { type: boolean }
+
+    Status:
+      type: string
+      enum: [online, away, busy, invisible]
+
+    Session:
+      type: object
+      properties:
+        token: { type: string }
+        expiresAt: { type: string, format: date-time }
+        me: { $ref: '#/components/schemas/Me' }
+
+    Me:
+      allOf:
+        - $ref: '#/components/schemas/Person'
+        - type: object
+          properties:
+            level: { type: integer }
+            xp: { type: number, format: float }
+            joinedAt: { type: string, format: date-time }
+            unreadChats: { type: integer }
+
+    Person:
+      type: object
+      required: [handle, name, hue, status]
+      properties:
+        handle: { type: string }
+        name: { type: string }
+        hue: { type: integer, minimum: 0, maximum: 359 }
+        status: { $ref: '#/components/schemas/Status' }
+        tagline: { type: string, nullable: true }
+        mood: { type: string, nullable: true }
+        doing: { type: string, nullable: true }
+        avatarMediaId: { type: string, format: uuid, nullable: true }
+        listening:
+          type: object
+          nullable: true
+          properties:
+            trackId: { type: string, format: uuid }
+            artist: { type: string }
+            title: { type: string }
+        room:
+          type: object
+          nullable: true
+          properties:
+            title: { type: string }
+            vibe: { type: string }
+            locked: { type: boolean }
+
+    RoomCard:
+      type: object
+      properties:
+        owner: { $ref: '#/components/schemas/Person' }
+        title: { type: string }
+        vibe: { type: string }
+        locked: { type: boolean }
+        dialect: { type: string }
+
+    RoomConfig:
+      type: object
+      description: То, что хозяин настроил про свою комнату.
+      properties:
+        title: { type: string, maxLength: 40 }
+        vibe: { type: string, maxLength: 140 }
+        theme: { type: string, enum: [dvor, fonar, led, malina] }
+        wallpaper: { type: string, enum: ['сетка', 'асфальт', 'звёзды', 'полосы', 'пусто'] }
+        backdropMediaId: { type: string, format: uuid, nullable: true }
+        backdropFit: { type: string, enum: ['обрезать', 'уместить', 'плитка'] }
+        backdropDim: { type: number, minimum: 0.25, maximum: 0.85 }
+        backdropBlur: { type: integer, minimum: 0, maximum: 12 }
+        sticker: { type: string, maxLength: 40, nullable: true }
+        chaos: { type: number, minimum: 0, maximum: 1 }
+        blocks:
+          type: array
+          description: Порядок важен — это и есть раскладка стены.
+          items:
+            type: string
+            enum: [about, music, friends, guestbook, activity, badges, video, communities, links]
+        wide:
+          type: string
+          nullable: true
+          description: Блок, растянутый на всю ширину.
+        lexicon: { $ref: '#/components/schemas/LexiconPayload' }
+
+    Room:
+      type: object
+      properties:
+        owner: { $ref: '#/components/schemas/Person' }
+        config: { $ref: '#/components/schemas/RoomConfig' }
+        mine: { type: boolean }
+        visitorsToday: { type: integer }
+        badges:
+          type: array
+          items: { $ref: '#/components/schemas/Badge' }
+        activity:
+          type: array
+          items: { $ref: '#/components/schemas/ActivityLine' }
+
+    LexiconPayload:
+      type: object
+      description: |
+        Язык места. `dialect` — готовый говор, `words` — точечные правки
+        поверх него. Ключи фиксированы кодом фронта.
+      properties:
+        dialect:
+          type: string
+          enum: [default, dvor, forum, catz, strict]
+        words:
+          type: object
+          additionalProperties: { type: string, maxLength: 22 }
+
+    GuestbookEntry:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        author: { $ref: '#/components/schemas/Person' }
+        body: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    CommunityCard:
+      type: object
+      properties:
+        slug: { type: string }
+        name: { type: string }
+        about: { type: string }
+        hue: { type: integer }
+        memberCount: { type: integer }
+        onlineCount: { type: integer }
+        freshCount: { type: integer }
+        foundedYear: { type: string }
+        sections:
+          type: array
+          items: { $ref: '#/components/schemas/Section' }
+        lexicon: { $ref: '#/components/schemas/LexiconPayload' }
+        joined: { type: boolean }
+
+    Community:
+      allOf:
+        - $ref: '#/components/schemas/CommunityCard'
+        - type: object
+          properties:
+            rules:
+              type: array
+              items: { type: string }
+            moderators:
+              type: array
+              items:
+                type: object
+                properties:
+                  person: { $ref: '#/components/schemas/Person' }
+                  origin: { type: string, enum: ['основал', 'выбрали', 'по репутации'] }
+            openPolls:
+              type: array
+              items: { $ref: '#/components/schemas/Poll' }
+            myRole: { type: string, enum: [guest, member, moderator, founder] }
+
+    Section:
+      type: object
+      properties:
+        key: { type: string, description: 'Что это за раздел технически: posts, threads, media, wiki, market, guides, board, replays, projects, rooms, music, members.' }
+        title: { type: string, description: 'Как сообщество его назвало.' }
+
+    Membership:
+      type: object
+      properties:
+        joined: { type: boolean }
+        role: { type: string }
+        reputation: { type: integer }
+
+    ModlogEntry:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: ['обычное', 'снятие', 'голос', 'права'] }
+        actor:
+          oneOf:
+            - $ref: '#/components/schemas/Person'
+            - type: 'null'
+          description: Пусто, если решение принято голосованием.
+        summary: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    Post:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        community:
+          type: object
+          properties:
+            slug: { type: string }
+            name: { type: string }
+            hue: { type: integer }
+            lexicon: { $ref: '#/components/schemas/LexiconPayload' }
+        author: { $ref: '#/components/schemas/Person' }
+        kind: { type: string, enum: [text, image, video, track] }
+        title: { type: string, nullable: true }
+        body: { type: string, nullable: true }
+        mediaIds:
+          type: array
+          items: { type: string, format: uuid }
+        track:
+          allOf: [{ $ref: '#/components/schemas/Track' }]
+          nullable: true
+        score: { type: integer }
+        myVote: { type: integer }
+        commentCount: { type: integer }
+        heat:
+          type: number
+          format: float
+          description: 0..1, активность за последний час. Фронт рисует по ней метку «активно обсуждают».
+        readingNow: { type: integer }
+        createdAt: { type: string, format: date-time }
+
+    PostDraft:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string, enum: [text, image, video, track] }
+        title: { type: string, maxLength: 200 }
+        body: { type: string, maxLength: 20000 }
+        mediaIds:
+          type: array
+          items: { type: string, format: uuid }
+        trackId: { type: string, format: uuid }
+
+    Comment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        author: { $ref: '#/components/schemas/Person' }
+        parentId: { type: string, format: uuid, nullable: true }
+        body: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    Thread:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        pinned: { type: boolean }
+        pollId: { type: string, format: uuid, nullable: true }
+        replyCount: { type: integer }
+        lastReplyAt: { type: string, format: date-time }
+
+    Event:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        startsAt: { type: string, format: date-time }
+        rsvpCount: { type: integer }
+        iGo: { type: boolean }
+
+    Poll:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        question: { type: string }
+        subject: { type: string, nullable: true }
+        yes: { type: integer }
+        no: { type: integer }
+        myVote: { type: boolean, nullable: true }
+        closesAt: { type: string, format: date-time }
+
+    FeedSource:
+      type: string
+      enum: ['сообщества', 'видео', 'комнаты', 'музыка', 'друзья']
+
+    FeedItem:
+      type: object
+      required: [id, kind, source, createdAt]
+      discriminator:
+        propertyName: kind
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [post, clip, room, music, community] }
+        source: { $ref: '#/components/schemas/FeedSource' }
+        createdAt: { type: string, format: date-time }
+        post:
+          allOf: [{ $ref: '#/components/schemas/Post' }]
+          nullable: true
+        clip:
+          allOf: [{ $ref: '#/components/schemas/Clip' }]
+          nullable: true
+        actor:
+          oneOf:
+            - $ref: '#/components/schemas/Person'
+            - type: 'null'
+        summary:
+          type: string
+          nullable: true
+          description: Готовая фраза для строчек про комнаты и музыку.
+        detail: { type: string, nullable: true }
+        track:
+          allOf: [{ $ref: '#/components/schemas/Track' }]
+          nullable: true
+        community:
+          type: object
+          nullable: true
+          properties:
+            slug: { type: string }
+            name: { type: string }
+            hue: { type: integer }
+        pollId: { type: string, format: uuid, nullable: true }
+
+    Clip:
+      type: object
+      description: |
+        Раздел видео ещё не решён продуктово. Пока это то немногое, что
+        нужно ленте, чтобы нарисовать карточку. Ломающие изменения тут
+        ожидаемы — на них ничего критичного не завязано.
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        author: { $ref: '#/components/schemas/Person' }
+        communitySlug: { type: string, nullable: true }
+        durationSec: { type: integer, nullable: true }
+        live: { type: boolean }
+        views: { type: integer }
+        watchingNow: { type: integer, nullable: true }
+        posterMediaId: { type: string, format: uuid, nullable: true }
+        hue: { type: integer }
+        reason:
+          type: object
+          description: Почему клип вообще оказался перед человеком.
+          properties:
+            who: { type: string }
+            act: { type: string, enum: ['загрузил', 'репостнул', 'обсуждают', 'отправил', 'подписка'] }
+            detail: { type: string, nullable: true }
+
+    Nexus:
+      type: object
+      properties:
+        me: { $ref: '#/components/schemas/Me' }
+        counters:
+          type: object
+          properties:
+            friendsOnline: { type: integer }
+            unread: { type: integer }
+            freshInCommunities: { type: integer }
+            visitorsToday: { type: integer }
+            feedToday: { type: integer }
+            clipsToday: { type: integer }
+        activity:
+          type: array
+          items: { $ref: '#/components/schemas/ActivityLine' }
+        sinceLastVisit: { type: string, format: date-time }
+
+    ActivityLine:
+      type: object
+      properties:
+        actor: { $ref: '#/components/schemas/Person' }
+        text: { type: string }
+        createdAt: { type: string, format: date-time }
+        href: { type: string, nullable: true }
+
+    Topic:
+      type: object
+      properties:
+        tag: { type: string }
+        scope: { type: string }
+        heat: { type: number, format: float }
+
+    Track:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        artist: { type: string }
+        artistSlug: { type: string }
+        album: { type: string, nullable: true }
+        durationSec: { type: integer }
+        bpm: { type: integer, nullable: true }
+        hue: { type: integer }
+        audioUrl: { type: string, nullable: true }
+        tags:
+          type: array
+          items: { type: string }
+
+    Listener:
+      type: object
+      properties:
+        person: { $ref: '#/components/schemas/Person' }
+        track: { $ref: '#/components/schemas/Track' }
+        positionSec: { type: integer }
+
+    Artist:
+      type: object
+      properties:
+        slug: { type: string }
+        name: { type: string }
+        about: { type: string }
+        hue: { type: integer }
+        listeners: { type: integer }
+        sections:
+          type: array
+          items: { $ref: '#/components/schemas/Section' }
+        releases:
+          type: array
+          items:
+            type: object
+            properties:
+              title: { type: string }
+              year: { type: string }
+              trackCount: { type: integer }
+        threads:
+          type: array
+          items: { $ref: '#/components/schemas/Thread' }
+
+    Badge:
+      type: object
+      properties:
+        key: { type: string }
+        name: { type: string }
+        description: { type: string }
+        hue: { type: integer }
+        granted: { type: boolean }
+
+    ChatSummary:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: ['личное', 'беседа'] }
+        title: { type: string }
+        hue: { type: integer }
+        memberCount: { type: integer, nullable: true }
+        unread: { type: integer }
+        lastMessage:
+          allOf: [{ $ref: '#/components/schemas/Message' }]
+          nullable: true
+
+    Message:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        chatId: { type: string, format: uuid }
+        seq:
+          type: integer
+          format: int64
+          description: Монотонный внутри беседы. По нему работает дочитывание и догрузка после разрыва.
+        author: { $ref: '#/components/schemas/Person' }
+        body: { type: string, nullable: true }
+        mediaId: { type: string, format: uuid, nullable: true }
+        createdAt: { type: string, format: date-time }
+        editedAt: { type: string, format: date-time, nullable: true }
+
+    MessageDraft:
+      type: object
+      properties:
+        body: { type: string, maxLength: 4000 }
+        mediaId: { type: string, format: uuid }
+        clientToken:
+          type: string
+          format: uuid
+          description: Идемпотентность. Повторная отправка с тем же токеном возвращает то же сообщение.
+
+    Media:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        url: { type: string }
+        mime: { type: string }
+        byteSize: { type: integer }
+        width: { type: integer, nullable: true }
+        height: { type: integer, nullable: true }
