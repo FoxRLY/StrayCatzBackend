@@ -1,6 +1,5 @@
 package org.example.bus
 
-import com.fasterxml.jackson.annotation.JsonInclude
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.quarkus.logging.Log
@@ -17,18 +16,12 @@ import jakarta.transaction.Transactional
 import org.eclipse.microprofile.config.inject.ConfigProperty
 import org.example.proto.Envelope
 import org.example.registry.ConnectionRegistry
-import java.util.UUID
+import java.util.*
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 private const val CHANNEL = "straycatz_bus"
-
-object PointerKinds {
-    const val MESSAGE_NEW = "message.new"
-    const val MESSAGE_UPDATED = "message.updated"
-    const val CALL_SIGNAL = "call.signal"
-}
 
 /**
  * Рассылка между нодами через Postgres LISTEN/NOTIFY.
@@ -92,6 +85,11 @@ class EventBus(
     fun publishToChat(chatId: UUID, frame: Envelope, liveOnly: Boolean = false) =
         notify(BusMessage(scope = Scope.CHAT, chatId = chatId, liveOnly = liveOnly, frame = mapper.valueToTree(frame)))
 
+    /** Всем, у кого сейчас открыта комната ownerId (room.open). */
+    @Transactional
+    fun publishToRoomViewers(ownerId: UUID, frame: Envelope) =
+        notify(BusMessage(scope = Scope.ROOM, roomOwnerId = ownerId, frame = mapper.valueToTree(frame)))
+
     @Transactional
     fun publishToUsers(userIds: Collection<UUID>, frame: Envelope) {
         if (userIds.isEmpty()) return
@@ -140,7 +138,11 @@ class EventBus(
     private fun deliverLocally(msg: BusMessage, text: String) {
         val userIds = msg.userIds
         val chatId = msg.chatId
+        val roomOwnerId = msg.roomOwnerId
         val targetConnIds: Set<String> = when {
+            roomOwnerId != null ->
+                registry.all().filter { roomOwnerId in it.openRooms }.mapTo(HashSet()) { it.connectionId }
+
             userIds != null ->
                 userIds.flatMapTo(HashSet()) { registry.connectionIdsOf(it) }
 
@@ -177,16 +179,3 @@ class EventBus(
     }
 }
 
-enum class Scope { CHAT, USERS }
-
-@JsonInclude(JsonInclude.Include.NON_NULL)
-data class BusMessage(
-    val scope: Scope,
-    val chatId: UUID? = null,
-    val userIds: List<UUID>? = null,
-    val liveOnly: Boolean = false,
-    val pointer: Pointer? = null,
-    val frame: JsonNode? = null,
-)
-
-data class Pointer(val kind: String, val id: String)

@@ -36,6 +36,10 @@ class AccountService(
 ) {
     companion object {
         private val USERNAME_RE = Regex("^[a-z0-9][a-z0-9_.-]{2,31}$")
+        /** Занятые под пути фронта/API: /rooms/me, /api/rooms/me и т.п. */
+        private val RESERVED_USERNAMES = setOf(
+            "me", "admin", "api", "root", "system", "support", "straycatz", "settings", "new", "null", "undefined",
+        )
         private val EMAIL_RE = Regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$")
         const val MIN_PASSWORD = 8
         const val MAX_PASSWORD = 128
@@ -50,6 +54,7 @@ class AccountService(
                 "invalid_username",
                 "логин: 3–32 символа, латиница/цифры/._-, начинается с буквы или цифры",
             )
+        if (username in RESERVED_USERNAMES) throw ApiException.conflict("username_taken", "этот логин зарезервирован")
         val email = req.email?.trim()?.lowercase()?.takeIf { it.length <= 254 && EMAIL_RE.matches(it) }
             ?: throw ApiException.badRequest("invalid_email", "некорректный email")
         val password = validPassword(req.password)

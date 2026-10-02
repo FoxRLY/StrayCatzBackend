@@ -7,13 +7,23 @@ import jakarta.persistence.EntityManager
 import jakarta.transaction.Transactional
 import org.example.bus.BusResolver
 import org.example.bus.EventBus
-import org.example.domain.*
+import org.example.domain.AppUser
+import org.example.domain.Chat
+import org.example.domain.ChatMember
+import org.example.domain.ChatMemberId
+import org.example.domain.ChatSeqEntity
+import org.example.domain.Message
 import org.example.proto.ChatUpdatedOut
 import org.example.proto.Envelope
 import org.example.proto.FrameTypes
-import org.example.rest.*
+import org.example.rest.ApiException
+import org.example.rest.ChatDetailsOut
+import org.example.rest.ChatListItemOut
+import org.example.rest.ChatMemberOut
+import org.example.rest.CreateChatIn
+import org.example.rest.MessagePageOut
 import java.time.Instant
-import java.util.*
+import java.util.UUID
 
 /**
  * REST-часть чатов: список, карточка, история, создание, участники.
@@ -25,10 +35,12 @@ class ChatManagementService(
     private val bus: EventBus,
     private val mapper: ObjectMapper,
     private val profiles: UserProfileService,
+    private val resolver: BusResolver,
 ) {
     companion object {
         const val ROOM_DIRECT = "direct"
         const val ROOM_GROUP = "group"
+        const val ROOM_STREAM = "stream"
         const val MAX_PAGE = 100
         const val MAX_GROUP_MEMBERS = 200
         const val MAX_NAME = 100
@@ -40,7 +52,9 @@ class ChatManagementService(
     @Transactional
     fun listMine(me: UUID): List<ChatListItemOut> {
         val memberships = ChatMember.list(
-            "id.userId = ?1 and isDeleted = false and id.chatId in (select c.id from Chat c where c.isDeleted = false)",
+            // чаты стримов — не беседы: в список не попадают (у них своя страница)
+            "id.userId = ?1 and isDeleted = false and id.chatId in " +
+                    "(select c.id from Chat c where c.isDeleted = false and c.roomType <> '$ROOM_STREAM')",
             me,
         )
         if (memberships.isEmpty()) return emptyList()
@@ -49,6 +63,7 @@ class ChatManagementService(
         val chats = Chat.list("id in ?1", chatIds).associateBy { it.id }
         val lastSeq = ChatSeqEntity.list("chatId in ?1", chatIds).associate { it.chatId to it.nextSeq - 1 }
         val lastMessages = lastMessages(chatIds)
+        val lastRendered = resolver.render(lastMessages.values.toList()).associateBy { it.chatId }
 
         // собеседники в личках
         val directIds = chats.values.filter { it.roomType == ROOM_DIRECT }.map { it.id }
@@ -68,7 +83,8 @@ class ChatManagementService(
                 lastSeq = last,
                 lastReadSeq = m.lastReadSeq,
                 unread = (last - m.lastReadSeq).coerceAtLeast(0),
-                lastMessage = lastMessages[chat.id]?.let { BusResolver.toOut(it) },
+                lastMessage = lastRendered[chat.id],
+                avatar = chat.avatar ?: peerByChat[chat.id]?.let { peers[it]?.avatar },
             )
         }.sortedByDescending { it.lastMessage?.createdAt ?: chats[it.chatId]?.createdAt ?: Instant.EPOCH }
     }
@@ -88,6 +104,9 @@ class ChatManagementService(
             members = members.mapNotNull { m ->
                 users[m.id.userId]?.let { ChatMemberOut(it, m.lastReadSeq, m.createdAt) }
             },
+            avatar = chat.avatar ?: if (chat.roomType == ROOM_DIRECT) {
+                members.firstOrNull { it.id.userId != me }?.let { users[it.id.userId]?.avatar }
+            } else null,
         )
     }
 
@@ -112,7 +131,7 @@ class ChatManagementService(
         }
         val hasMore = rows.size > size
         val page = rows.take(size).let { if (after != null) it else it.reversed() }
-        return MessagePageOut(page.map { BusResolver.toOut(it) }, hasMore)
+        return MessagePageOut(resolver.render(page), hasMore)
     }
 
     // ---------------------------------------------------------------- запись
@@ -124,6 +143,10 @@ class ChatManagementService(
         ROOM_GROUP -> createGroup(me, req.name, req.memberIds)
         else -> throw ApiException.badRequest("invalid_chat", "type: direct или group")
     }
+
+    /** Личка с человеком: найти или создать. Для «переслать в личку» и т.п. */
+    @Transactional
+    fun directChatId(me: UUID, other: UUID): UUID = createDirect(me, other).first.chatId
 
     private fun createDirect(me: UUID, other: UUID): Pair<ChatDetailsOut, Boolean> {
         if (other == me) throw ApiException.badRequest("invalid_chat", "нельзя создать личку с собой")
@@ -175,10 +198,7 @@ class ChatManagementService(
     @Transactional
     fun addMember(chatId: UUID, me: UUID, userId: UUID): ChatDetailsOut {
         val chat = requireMember(chatId, me)
-        if (chat.roomType != ROOM_GROUP) throw ApiException.badRequest(
-            "invalid_chat",
-            "добавлять можно только в группу"
-        )
+        if (chat.roomType != ROOM_GROUP) throw ApiException.badRequest("invalid_chat", "добавлять можно только в группу")
         requireActiveUser(userId)
         if (activateMember(chatId, userId)) {
             notify(activeMemberIds(chatId), chatId, "member_added", userId)
@@ -232,8 +252,7 @@ class ChatManagementService(
         ChatMember.list("id.chatId = ?1 and isDeleted = false", chatId).map { it.id.userId }
 
     private fun notify(userIds: Collection<UUID>, chatId: UUID, reason: String, userId: UUID?) {
-        val frame =
-            Envelope(t = FrameTypes.CHAT_UPDATED, d = mapper.valueToTree(ChatUpdatedOut(chatId, reason, userId)))
+        val frame = Envelope(t = FrameTypes.CHAT_UPDATED, d = mapper.valueToTree(ChatUpdatedOut(chatId, reason, userId)))
         bus.publishToUsers(userIds.distinct(), frame) // уйдёт после COMMIT
     }
 

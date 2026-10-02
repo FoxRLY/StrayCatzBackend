@@ -2,6 +2,15 @@ package org.example.proto
 
 import com.fasterxml.jackson.annotation.JsonInclude
 import com.fasterxml.jackson.databind.JsonNode
+import org.example.rest.AttachmentOut
+import org.example.rest.ForwardOriginOut
+import org.example.rest.GifOut
+import org.example.rest.PostCommunityOut
+import org.example.rest.ReactionOut
+import org.example.rest.ReplyPreviewOut
+import org.example.rest.StickerOut
+import org.example.rest.TrackOut
+import org.example.rest.UserShortOut
 import java.time.Instant
 import java.util.UUID
 
@@ -38,6 +47,49 @@ data class MessageOut(
     val createdAt: Instant,
     val editedAt: Instant? = null,
     val deletedAt: Instant? = null,
+    /** Репост записи («поделиться»): GET /api/posts/{id} за карточкой. */
+    val sharedPostId: UUID? = null,
+    /** Картинки/гифки/видео к сообщению (у удалённого — пусто). */
+    val attachments: List<AttachmentOut> = emptyList(),
+    /** Прикреплённые треки (inLibrary здесь всегда false). */
+    val tracks: List<TrackOut> = emptyList(),
+    /** Карточка пересланной записи — чтобы нарисовать превью без лишнего запроса. */
+    val sharedPost: SharedPostOut? = null,
+    /** Ответ на сообщение — превью того, на что отвечают. */
+    val replyTo: ReplyPreviewOut? = null,
+    /** Переслано от … (автор и время оригинала). */
+    val forwardedFrom: ForwardOriginOut? = null,
+    /** Гифка или внешний стикер (kind = sticker — рисовать без пузыря). */
+    val gif: GifOut? = null,
+    /** Стикер из набора — рисовать без пузыря. */
+    val sticker: StickerOut? = null,
+    /** Реакции: [{emoji, count, userIds}] — «моя» = userIds содержит меня. */
+    val reactions: List<ReactionOut> = emptyList(),
+    /** Кого упомянули @ником (участники чата) — для подсветки. */
+    val mentions: List<UserShortOut> = emptyList(),
+)
+
+/**
+ * Превью пересланной записи внутри сообщения. Полная запись — GET /api/posts/{id}.
+ * deleted = true — запись удалена (остальные поля пустые).
+ */
+data class SharedPostOut(
+    val id: UUID,
+    val deleted: Boolean = false,
+    /** community / pulse / wall */
+    val source: String? = null,
+    val kind: String? = null,
+    val title: String? = null,
+    /** Начало текста, до 200 символов. */
+    val text: String? = null,
+    val author: UserShortOut? = null,
+    val community: PostCommunityOut? = null,
+    val asCommunity: Boolean = false,
+    val wallOwner: UserShortOut? = null,
+    /** Первое вложение (картинка или видео) — обложка превью. */
+    val cover: AttachmentOut? = null,
+    val attachmentsCount: Int = 0,
+    val createdAt: Instant? = null,
 )
 
 data class MessageAckOut(
@@ -55,6 +107,9 @@ data class ChatUpdatedOut(val chatId: UUID, val reason: String, val userId: UUID
 
 /** state с точки зрения получателя: incoming / friends / none */
 data class FriendUpdatedOut(val userId: UUID, val state: String)
+
+/** what: look / links / guestbook */
+data class RoomUpdatedOut(val ownerId: UUID, val what: String)
 
 data class TypingOut(val chatId: UUID, val userId: UUID)
 

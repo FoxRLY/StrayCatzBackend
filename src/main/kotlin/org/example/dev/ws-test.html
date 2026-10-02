@@ -58,6 +58,9 @@
     <button data-get="/api/users/me">GET me</button>
     <button data-get="/api/chats">GET chats</button>
     <button data-get="/api/friends">GET friends</button>
+    <button data-get="/api/rooms/me">GET моя комната</button>
+    <button data-get="/api/notifications">GET уведомления</button>
+    <button data-get="/api/communities">GET сообщества</button>
     <label>chatId <input id="chat" size="38" value="aaaaaaaa-0000-0000-0000-000000000001"></label>
     <button id="hist">история (последние)</button>
     <button id="older">ещё старее</button>
@@ -66,6 +69,15 @@
     <select id="method"><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option></select>
     <input id="path" size="40" value="/api/users?q=b">
     <button id="do">отправить</button>
+  </div>
+  <div class="row">
+    <label>комната <input id="room" size="12" value="alice"></label>
+    <button id="room-get">открыть</button>
+    <button id="room-visit">visit</button>
+    <button id="room-invite">позвать в гости</button>
+    <label>картинка <input id="file" type="file" accept="image/*"></label>
+    <button id="upload">загрузить</button>
+    <button id="wall">поставить на стену</button>
   </div>
   <textarea id="body" placeholder='тело запроса (JSON), напр. {"type":"direct","userId":"33333333-3333-3333-3333-333333333333"}'></textarea>
   <div class="log" id="rest-out"></div>
@@ -159,6 +171,27 @@
     let body; try { body = raw ? JSON.parse(raw) : undefined; } catch { return restLog('тело — не JSON'); }
     api($('method').value, $('path').value, body);
   };
+
+  let lastMediaId = null, lastRoomOwner = null;
+  $('room-get').onclick = async () => {
+    const r = await api('GET', `/api/rooms/${$('room').value}`);
+    if (r.status < 300) {
+      lastRoomOwner = r.data.owner.id;
+      if (ws && ws.readyState === 1) { ws.send(JSON.stringify({ t: 'room.open', d: { ownerId: lastRoomOwner } })); wsLog('->', 'room.open ' + lastRoomOwner); }
+    }
+  };
+  $('room-visit').onclick = () => api('POST', `/api/rooms/${$('room').value}/visit`);
+  $('room-invite').onclick = () => api('POST', `/api/rooms/${$('room').value}/invite`);
+  $('upload').onclick = async () => {
+    const f = $('file').files[0]; if (!f) return restLog('выбери файл');
+    const fd = new FormData(); fd.append('file', f);
+    const headers = {}; const a = authHeader(); if (a) headers['Authorization'] = a;
+    const res = await fetch($('api').value + '/api/media', { method: 'POST', headers, body: fd });
+    const data = await res.json().catch(() => null);
+    restLog(`POST /api/media -> ${res.status}\n${JSON.stringify(data, null, 2)}`);
+    if (res.status < 300) lastMediaId = data.id;
+  };
+  $('wall').onclick = () => lastMediaId ? api('PUT', '/api/rooms/me/wall-image', { mediaId: lastMediaId }) : restLog('сначала загрузи картинку');
 
   $('connect').onclick = () => {
     const auth = accessToken ? `bearer.${accessToken}` : ($('dev').value ? `dev.${$('dev').value}` : null);

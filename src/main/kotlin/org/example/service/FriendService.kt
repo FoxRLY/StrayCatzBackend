@@ -25,6 +25,7 @@ class FriendService(
     private val bus: EventBus,
     private val mapper: ObjectMapper,
     private val profiles: UserProfileService,
+    private val notifications: NotificationService,
 ) {
     private data class Row(val initiator: UUID, val acceptor: UUID, val accepted: Boolean)
 
@@ -60,6 +61,10 @@ class FriendService(
                 em.createNativeQuery("insert into friendship (initiator_id, acceptor_id, is_accepted) values (?1, ?2, false)")
                     .setParameter(1, me).setParameter(2, other).executeUpdate()
                 push(other, me, "incoming")
+                // колокольчик: «X хочет дружить» (не чаще раза в сутки от одного человека — на случай отозвал/отправил снова)
+                if (!notifications.sentRecently(other, me, NotificationService.FRIEND_REQUEST, java.time.Duration.ofDays(1))) {
+                    notifications.notify(other, NotificationService.FRIEND_REQUEST, me, mapOf("userId" to me.toString()))
+                }
                 FriendStateOut(other, "outgoing")
             }
             row.accepted -> FriendStateOut(other, "friends")
@@ -68,6 +73,7 @@ class FriendService(
                     "update friendship set is_accepted = true, accepted_at = now() where initiator_id = ?1 and acceptor_id = ?2",
                 ).setParameter(1, other).setParameter(2, me).executeUpdate()
                 push(other, me, "friends")
+                notifications.notify(other, NotificationService.FRIEND_ACCEPTED, me, mapOf("userId" to me.toString()))
                 FriendStateOut(other, "friends")
             }
             else -> FriendStateOut(other, "outgoing")
@@ -85,6 +91,23 @@ class FriendService(
         ).setParameter(1, me).setParameter(2, other).executeUpdate()
         if (n > 0) push(other, me, "none")
         return FriendStateOut(other, "none")
+    }
+
+    /** Подтверждённые друзья любого пользователя (для комнаты). */
+    @Transactional
+    fun friendIdsOf(userId: UUID): List<UUID> =
+        rowsOf(userId).filter { it.accepted }.map { if (it.initiator == userId) it.acceptor else it.initiator }
+
+    /** Отношение me к other: self / none / outgoing / incoming / friends. */
+    @Transactional
+    fun stateBetween(me: UUID, other: UUID): String {
+        if (me == other) return "self"
+        val row = pair(me, other) ?: return "none"
+        return when {
+            row.accepted -> "friends"
+            row.initiator == me -> "outgoing"
+            else -> "incoming"
+        }
     }
 
     // ------------------------------------------------------------------

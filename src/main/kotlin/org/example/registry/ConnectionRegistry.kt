@@ -17,6 +17,9 @@ class ConnState(
     /** Беседы, открытые на экране (chat.open) — сюда летит typing. */
     val openChats: MutableSet<UUID> = ConcurrentHashMap.newKeySet()
 
+    /** Комнаты, открытые на экране (room.open) — сюда летит room.updated. Храним ownerId. */
+    val openRooms: MutableSet<UUID> = ConcurrentHashMap.newKeySet()
+
     /** Кэш членства, чтобы не ходить в БД на каждый кадр. Сбрасывается на hello. */
     val memberChats: MutableSet<UUID> = ConcurrentHashMap.newKeySet()
 

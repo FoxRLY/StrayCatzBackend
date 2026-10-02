@@ -1,0 +1,60 @@
+# MediaMTX для стримов straycatz (образ bluenviron/mediamtx:1.9.3).
+#
+# OBS ──RTMP :1935──▶ MediaMTX ──▶ зрители: HLS :8888 / WebRTC :8889
+# Поток раздаётся как есть, без перекодирования (remux RTMP → HLS/WebRTC).
+#
+# Кого пускать, решает бэкенд: authMethod http → POST на /api/hooks/mediamtx/auth.
+# secret в адресе = straycatz.streams.hook-secret в application.properties.
+
+logLevel: info
+
+# ---------------------------------------------------------------- API (только для бэкенда)
+# Бэкенд раз в 5 с читает /v3/paths/list и кикает издателей. Наружу не открывать:
+# в docker-compose порт проброшен только на 127.0.0.1.
+api: yes
+apiAddress: :9997
+
+# ---------------------------------------------------------------- авторизация
+authMethod: http
+# backend запущен на хосте (quarkus dev). В проде — адрес сервиса бэкенда в сети docker/k8s.
+authHTTPAddress: http://host.docker.internal:8080/api/hooks/mediamtx/auth?secret=dev-mediamtx-hook-secret
+# Смотреть может любой (эфиры публичные), поэтому просмотр хук не дёргает:
+# иначе MediaMTX звал бы бэкенд на КАЖДЫЙ запрос плейлиста/сегмента HLS.
+authHTTPExclude:
+  - action: api
+  - action: metrics
+  - action: pprof
+  - action: read
+  - action: playback
+
+# ---------------------------------------------------------------- протоколы
+rtsp: no
+srt: no
+
+# приём из OBS: rtmp://host:1935/live, ключ "<channel>?pass=<secret>"
+rtmp: yes
+rtmpAddress: :1935
+
+# зрители: http://host:8888/live/<channel>/index.m3u8 (hls.js / Safari)
+hls: yes
+hlsAddress: :8888
+hlsAllowOrigin: '*'
+# LL-HLS: задержка 1–3 с. Нужен ключевой кадр каждые 1–2 с в OBS.
+hlsVariant: lowLatency
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+
+# зрители с задержкой < 1 с: WHEP http://host:8889/live/<channel>/whep
+# (звук по WebRTC — только Opus; с AAC из OBS будет видео без звука, поэтому основной — HLS)
+webrtc: yes
+webrtcAddress: :8889
+webrtcAllowOrigin: '*'
+webrtcLocalUDPAddress: :8189
+# адрес, который браузер увидит в ICE-кандидатах (в проде — публичный IP/домен сервера)
+webrtcAdditionalHosts: [127.0.0.1]
+
+# ---------------------------------------------------------------- пути
+# Любой путь; какой можно публиковать/смотреть — решает хук (только live/<channel>).
+paths:
+  all_others:

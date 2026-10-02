@@ -41,6 +41,8 @@ class ChatService {
 
         return members.mapNotNull { m ->
             val chat = chatsById[m.id.chatId] ?: return@mapNotNull null
+            // чат стрима — не беседа: без него в ready, иначе висел бы в непрочитанных
+            if (chat.roomType == "stream") return@mapNotNull null
             val lastSeq = (seqByChat[m.id.chatId]?.nextSeq ?: 1L) - 1
             ChatSummaryOut(m.id.chatId, chat.roomType, chat.name, lastSeq, m.lastReadSeq)
         }

@@ -1,4 +1,4 @@
-package org.example.socket
+package org.example
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.quarkus.logging.Log
@@ -17,7 +17,9 @@ import org.example.registry.ConnState
 import org.example.registry.ConnectionRegistry
 import org.example.service.CallException
 import org.example.service.CallService
+import org.example.service.ChatActionsService
 import org.example.service.ChatService
+import org.example.service.MessageExtras
 import org.example.service.ForbiddenException
 import org.example.service.MessageService
 import org.example.service.MessageValidationException
@@ -43,6 +45,7 @@ class ChatSocket(
     private val messages: MessageService,
     private val presence: PresenceService,
     private val calls: CallService,
+    private val chatActions: ChatActionsService,
 ) {
     companion object {
         const val MAX_CONNECTIONS_PER_USER = 5
@@ -105,7 +108,10 @@ class ChatSocket(
                 FrameTypes.TYPING -> handleTyping(st, env)
                 FrameTypes.PRESENCE_SET -> handlePresenceSet(st, env)
                 FrameTypes.PRESENCE_QUERY -> handlePresenceQuery(st, env)
+                FrameTypes.ROOM_OPEN -> st.openRooms.add(codec.payloadAs(env, RoomOpenIn::class.java).ownerId)
+                FrameTypes.ROOM_CLOSE -> st.openRooms.remove(codec.payloadAs(env, RoomOpenIn::class.java).ownerId)
                 FrameTypes.PING -> send(FrameTypes.PONG, null, env.rid)
+                FrameTypes.REACTION_ADD, FrameTypes.REACTION_REMOVE -> handleReaction(st, env)
 
                 FrameTypes.CALL_INVITE -> handleCallInvite(st, env)
                 FrameTypes.CALL_ACCEPT -> handleCallAccept(st, env)
@@ -122,6 +128,9 @@ class ChatSocket(
         } catch (e: com.fasterxml.jackson.core.JacksonException) {
             Log.debugf("некорректный d для %s: %s", env.t, e.originalMessage)
             sendError(env.rid, ErrorCodes.BAD_FRAME, "некорректный d для ${env.t}: ${e.originalMessage?.take(200)}")
+        } catch (e: org.example.rest.ApiException) {
+            // ошибки из общих сервисов (например, вложения): тот же code, что и в REST
+            sendError(env.rid, e.code, e.message ?: e.code)
         } catch (e: MessageValidationException) {
             sendError(env.rid, ErrorCodes.BAD_FRAME, e.message ?: "validation error")
         } catch (e: ForbiddenException) {
@@ -164,8 +173,18 @@ class ChatSocket(
         if (!st.sendBucket.tryTake()) {
             return sendError(rid, ErrorCodes.RATE_LIMITED, "не чаще 10 message.send в секунду")
         }
-        val ack = messages.send(d.chatId, st.userId, d.body, d.mediaId, d.clientToken, rid)
+        val ack = messages.send(
+            d.chatId, st.userId, d.body, d.mediaId, d.clientToken, rid, mediaIds = d.mediaIds, trackIds = d.trackIds,
+            extras = MessageExtras(replyToId = d.replyToId, gifId = d.gifId, stickerId = d.stickerId),
+        )
         send(FrameTypes.MESSAGE_ACK, ack, rid)
+    }
+
+    private fun handleReaction(st: ConnState, env: Envelope) {
+        val d = codec.payloadAs(env, ReactionIn::class.java)
+        if (!requireMember(st, d.chatId, env.rid)) return
+        // всем участникам (и этому соединению) уйдёт message.reactions
+        chatActions.react(st.userId, d.chatId, d.messageId, d.emoji, add = env.t == FrameTypes.REACTION_ADD)
     }
 
     private fun handleMessageEdit(st: ConnState, env: Envelope) {

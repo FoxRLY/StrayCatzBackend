@@ -1,8 +1,9 @@
 package org.example.rest
 
+import com.fasterxml.jackson.annotation.JsonAlias
 import com.fasterxml.jackson.annotation.JsonInclude
-import org.example.proto.MessageOut
 import org.example.auth.KcTokenResponse
+import org.example.proto.MessageOut
 import java.time.Instant
 import java.util.UUID
 
@@ -48,6 +49,11 @@ data class AccountOut(
     val xp: Int,
     val level: Int,
     val createdAt: Instant,
+    /** Год регистрации строкой ("2023") — для «в сети с …». */
+    val memberSince: String,
+    /** Настроение и название своей комнаты — чтобы шапка и профиль не ходили в /api/rooms. */
+    val mood: String? = null,
+    val roomTitle: String? = null,
 )
 
 /** Чужой профиль по id. */
@@ -61,13 +67,37 @@ data class UserProfileOut(
     val xp: Int,
     val level: Int,
     val createdAt: Instant,
+    /** Год регистрации строкой ("2023") — для «в сети с …». */
+    val memberSince: String,
 )
 
 /** Короткая карточка — для списков (участники, друзья, поиск). */
 data class UserShortOut(val id: UUID, val username: String, val avatar: String?, val color: String?)
 
+/** PUT /api/users/me/avatar (JSON-вариант): картинка из POST /api/media. */
+data class AvatarIn(val mediaId: UUID? = null)
+
 /** PATCH /api/users/me: поле не передано/null — не меняем, "" — очищаем. */
-data class UpdateProfileIn(val avatar: String? = null, val color: String? = null, val tagline: String? = null)
+data class UpdateProfileIn(
+    /**
+     * Аватар — любое из:
+     *  - ссылка https://… или /api/media/{id};
+     *  - id картинки из POST /api/media (строкой);
+     *  - data:image/…;base64,… — сервер сам сохранит картинку (до 5 МБ);
+     *  - "" — убрать.
+     */
+    @JsonAlias("avatarUrl")
+    val avatar: String? = null,
+    /** То же, что avatar с id картинки. */
+    val avatarMediaId: UUID? = null,
+    val color: String? = null,
+    val tagline: String? = null,
+    /** Настроение комнаты («слушаю громко, отвечаю медленно»), до 140; "" — убрать. */
+    val mood: String? = null,
+    /** Название комнаты, 1–60. */
+    @JsonAlias("title")
+    val roomTitle: String? = null,
+)
 
 // ---------------------------------------------------------------- chats
 
@@ -81,6 +111,8 @@ data class ChatListItemOut(
     val lastReadSeq: Long,
     val unread: Long,
     val lastMessage: MessageOut?,
+    /** Аватар: у группы — свой, у лички — собеседника. null — рисовать по имени. */
+    val avatar: String? = null,
 )
 
 data class ChatMemberOut(val user: UserShortOut, val lastReadSeq: Long, val joinedAt: Instant)
@@ -92,6 +124,7 @@ data class ChatDetailsOut(
     val createdAt: Instant,
     val lastSeq: Long,
     val members: List<ChatMemberOut>,
+    val avatar: String? = null,
 )
 
 /**

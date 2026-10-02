@@ -32,6 +32,12 @@ object FrameTypes {
     const val PRESENCE_SET = "presence.set"
     const val PRESENCE_QUERY = "presence.query"
     const val PING = "ping"
+    /** Смотрю комнату — присылай room.updated, пока открыта. d = {ownerId} */
+    const val ROOM_OPEN = "room.open"
+    const val ROOM_CLOSE = "room.close"
+    /** Поставить / снять реакцию. d = {chatId, messageId, emoji} */
+    const val REACTION_ADD = "reaction.add"
+    const val REACTION_REMOVE = "reaction.remove"
 
     // звонки — от клиента
     const val CALL_INVITE = "call.invite"
@@ -50,6 +56,18 @@ object FrameTypes {
     const val CHAT_UPDATED = "chat.updated"
     /** Заявка в друзья / принятие / удаление. */
     const val FRIEND_UPDATED = "friend.updated"
+    /** Новое уведомление (приглашение в гости, запись в гостевой, ...). d = NotificationOut. */
+    const val NOTIFICATION_NEW = "notification.new"
+    /** Изменился счётчик непрочитанных (прочитал в другой вкладке и т.п.). d = {unread} */
+    const val NOTIFICATION_STATE = "notification.state"
+    /** Друг включил/выключил трек. d = NowPlayingOut */
+    const val NOW_PLAYING = "music.now_playing"
+    /** Хозяин поменял комнату (what: look / links / guestbook) — перечитай GET /api/rooms/{username}. */
+    const val ROOM_UPDATED = "room.updated"
+    /** Реакции на сообщении поменялись. Участникам чата. d = {chatId, messageId, reactions} */
+    const val MESSAGE_REACTIONS = "message.reactions"
+    /** Стрим начался/закончился/сменилось число зрителей. Участникам чата стрима. d = StreamStateOut */
+    const val STREAM_STATE = "stream.state"
     const val PRESENCE_CHANGED = "presence.changed"
     const val PRESENCE_SNAPSHOT = "presence.snapshot"
     const val FEED_BUMP = "feed.bump"

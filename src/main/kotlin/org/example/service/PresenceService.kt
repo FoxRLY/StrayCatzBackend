@@ -95,6 +95,21 @@ class PresenceService(
         return snapshot(wanted.filter { it in visible })
     }
 
+    /**
+     * Только статус (без «чем занят» и музыки) — для публичных списков вроде
+     * участников сообщества. invisible показывается как offline.
+     */
+    @Transactional
+    fun publicStatuses(userIds: Collection<UUID>): Map<UUID, String> {
+        if (userIds.isEmpty()) return emptyMap()
+        val ids = userIds.distinct()
+        val fromDb = UserPresenceEntity.list("userId in ?1", ids).associate { it.userId to it.status }
+        return ids.associateWith { id ->
+            val st = inMemory[id]?.let { synchronized(it) { it.status } } ?: fromDb[id] ?: "offline"
+            if (st == "invisible") "offline" else st
+        }
+    }
+
     @Transactional
     fun flushDirty() {
         val batch = dirty.toList()

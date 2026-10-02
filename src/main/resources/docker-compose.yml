@@ -34,6 +34,36 @@ services:
 
     volumes:
       - ./keycloak:/opt/keycloak/data/import:ro
+  # S3-совместимое хранилище для картинок и видео.
+  # API: http://localhost:9000, консоль: http://localhost:9001 (straycatz / straycatz-secret)
+  minio:
+    image: minio/minio:latest
+    command: [ "server", "/data", "--console-address", ":9001" ]
+    environment:
+      MINIO_ROOT_USER: straycatz
+      MINIO_ROOT_PASSWORD: straycatz-secret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+  # Стримы: принимает RTMP от OBS и раздаёт зрителям HLS/WebRTC без перекодирования.
+  # Кого пускать — спрашивает у бэкенда (auth-хук), см. mediamtx/mediamtx.yml.
+  mediamtx:
+    image: bluenviron/mediamtx:1.9.3
+    volumes:
+      - ./mediamtx/mediamtx.yml:/mediamtx.yml:ro
+    extra_hosts:
+      # бэкенд запущен на хосте (quarkus dev) — до него из контейнера так
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "1935:1935"            # RTMP (OBS)
+      - "8888:8888"            # HLS (зрители)
+      - "8889:8889"            # WebRTC WHEP (зрители)
+      - "8189:8189/udp"        # WebRTC медиа
+      - "127.0.0.1:9997:9997"  # API — только для бэкенда, наружу не открывать
 
 volumes:
   pgdata:
+  kcdata:
+  miniodata:

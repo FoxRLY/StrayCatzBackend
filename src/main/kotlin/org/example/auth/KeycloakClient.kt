@@ -1,6 +1,5 @@
-package org.example.ws.auth
+package org.example.auth
 
-import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.quarkus.logging.Log
 import jakarta.enterprise.context.ApplicationScoped
@@ -14,15 +13,6 @@ import java.net.http.HttpResponse
 import java.time.Duration
 import java.time.Instant
 import java.util.UUID
-
-/** Ответ token endpoint'а Keycloak'а. */
-data class KcTokenResponse(
-    @JsonProperty("access_token") val accessToken: String = "",
-    @JsonProperty("refresh_token") val refreshToken: String? = null,
-    @JsonProperty("expires_in") val expiresIn: Long = 0,
-    @JsonProperty("refresh_expires_in") val refreshExpiresIn: Long = 0,
-    @JsonProperty("token_type") val tokenType: String = "Bearer",
-)
 
 /**
  * Тонкий клиент к Keycloak на JDK HttpClient — без keycloak-admin-client,
@@ -209,6 +199,14 @@ class KeycloakClient(
         )
         if (r.statusCode() != 200) {
             Log.errorf("не смогли получить сервисный токен %s: %d %s", adminClientId, r.statusCode(), r.body())
+            if (r.statusCode() == 401) {
+                Log.errorf(
+                    "Подсказка: в realm нет клиента %s или у него другой secret. Realm импортируется " +
+                        "только при первом старте Keycloak — добавь клиента (см. README, раздел про Keycloak) " +
+                        "и сверь straycatz.keycloak.admin-client-secret.",
+                    adminClientId,
+                )
+            }
             throw upstream(r)
         }
         val t = mapper.readValue(r.body(), KcTokenResponse::class.java)

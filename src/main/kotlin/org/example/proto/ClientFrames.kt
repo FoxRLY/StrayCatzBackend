@@ -17,14 +17,31 @@ data class ChatCloseIn(val chatId: UUID)
 data class MessageSendIn(
     val chatId: UUID,
     val body: String? = null,
+    /** Устарело: одна картинка. */
     val mediaId: UUID? = null,
+    /** До 4 картинок/гифок или одно видео — id из POST /api/media. */
+    val mediaIds: List<UUID> = emptyList(),
+    /** До 10 треков из своей музыки. */
+    val trackIds: List<UUID> = emptyList(),
     val clientToken: UUID,
+    /** Ответ на сообщение этого же чата. */
+    val replyToId: UUID? = null,
+    /** Гифка или внешний стикер — id из GET /api/gifs/search|trending|recent. */
+    val gifId: UUID? = null,
+    /** Стикер из набора — id из GET /api/stickers/… */
+    val stickerId: UUID? = null,
 )
+
+/** reaction.add / reaction.remove — то же, что PUT/DELETE …/reactions/{emoji}. */
+data class ReactionIn(val chatId: UUID, val messageId: UUID, val emoji: String)
 
 data class MessageEditIn(val chatId: UUID, val messageId: UUID, val body: String)
 data class MessageDeleteIn(val chatId: UUID, val messageId: UUID)
 
 data class MessageReadIn(val chatId: UUID, val seq: Long)
+
+/** room.open / room.close: ownerId из GET /api/rooms/{username}. */
+data class RoomOpenIn(val ownerId: UUID)
 
 data class TypingIn(val chatId: UUID)
 
