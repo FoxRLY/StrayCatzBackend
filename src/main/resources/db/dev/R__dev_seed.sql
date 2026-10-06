@@ -60,7 +60,7 @@ on conflict (owner_id) do update set
                                      dialect = excluded.dialect, words = excluded.words, blocks = excluded.blocks;
 
 -- уровень/опыт alice — целые числа, фронт делит xp на 100 сам
-update user_level set level = 12, xp = 340 where user_id = '11111111-1111-1111-1111-111111111111';
+update user_level set level = 3, xp = 340 where user_id = '11111111-1111-1111-1111-111111111111';
 
 -- carol тоже дружит с alice — у alice два друга в блоке
 insert into friendship (initiator_id, acceptor_id, is_accepted, accepted_at)

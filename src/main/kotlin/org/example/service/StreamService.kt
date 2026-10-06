@@ -265,6 +265,7 @@ class StreamService(
             m == null -> ChatMember().also { it.id = ChatMemberId(s.chatId, me) }.persist()
             m.isDeleted -> { m.isDeleted = false; m.deletedAt = null }
         }
+        bus.membershipChanged(listOf(me))
         return render(listOf(s), me).first()
     }
 
@@ -272,6 +273,7 @@ class StreamService(
     fun leaveChat(me: UUID, id: UUID) {
         val s = find(id)
         ChatMember.findById(ChatMemberId(s.chatId, me))?.let { it.isDeleted = true; it.deletedAt = Instant.now() }
+        bus.membershipChanged(listOf(me))
     }
 
     // ================================================================ хук медиасервера
@@ -401,6 +403,7 @@ class StreamService(
         }
         chat.persist()
         ChatMember().also { it.id = ChatMemberId(chat.id, by) }.persist()
+        bus.membershipChanged(listOf(by))
         val s = Stream().also {
             it.id = UUID.randomUUID()
             it.channelId = ch.id
@@ -470,7 +473,7 @@ class StreamService(
             else -> emptySet()
         }
         val payload = mapOf("streamId" to s.id.toString(), "title" to s.title, "communitySlug" to community?.slug)
-        (to - s.createdBy).forEach { notifications.notify(it, NotificationService.STREAM_LIVE, s.createdBy, payload) }
+        notifications.notifyMany(to - s.createdBy, NotificationService.STREAM_LIVE, s.createdBy, payload)
     }
 
     private fun pushState(s: Stream, viewers: Long? = null) {
@@ -647,16 +650,20 @@ class StreamService(
 class StreamSyncJob(
     private val streams: StreamService,
     private val mediaServer: MediaServerClient,
+    private val lease: JobLease,
     @ConfigProperty(name = "straycatz.streams.enabled", defaultValue = "true")
     private val enabled: Boolean,
 ) {
     @Scheduled(every = "5s", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     fun sync() {
         if (!enabled || !streams.hasActive()) return
+        if (!lease.acquire("stream-sync", java.time.Duration.ofSeconds(20))) return // сверяет одна нода
         val paths = mediaServer.paths() ?: return // медиасервер лежит — статусы не трогаем
         streams.applySnapshot(paths).forEach { (type, id) -> mediaServer.kick(type, id) }
     }
 
     @Scheduled(every = "1h", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
-    fun purge() = streams.purgeViewers()
+    fun purge() {
+        if (lease.acquire("stream-purge", java.time.Duration.ofMinutes(50))) streams.purgeViewers()
+    }
 }

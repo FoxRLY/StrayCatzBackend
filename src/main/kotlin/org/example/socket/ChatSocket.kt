@@ -49,6 +49,16 @@ class ChatSocket(
 ) {
     companion object {
         const val MAX_CONNECTIONS_PER_USER = 5
+        const val TYPING_EVERY_MS = 1500L
+        const val STREAM_SEND_EVERY_MS = 2000L
+        /** Сколько hello обрабатываем одновременно на ноде (ready — несколько запросов в БД). */
+        val HELLO_GATE = java.util.concurrent.Semaphore(64)
+        /** Служебные кадры — не считаются действием человека (не сбрасывают «отошёл»). */
+        val PASSIVE_FRAMES = setOf(
+            FrameTypes.PING, FrameTypes.PRESENCE_QUERY, FrameTypes.CHAT_CLOSE, FrameTypes.ROOM_CLOSE, FrameTypes.HELLO,
+            // приходит сам, пока чат открыт на экране
+            FrameTypes.MESSAGE_READ,
+        )
     }
 
     private val codec = EnvelopeCodec(mapper)
@@ -67,7 +77,8 @@ class ChatSocket(
         }
 
         val firstConnection = registry.connectionCount(ticket.userId) == 0
-        registry.put(ConnState(connection.id(), ticket.userId, ticket.username))
+        // подписки шины: на человека и на все его чаты — сообщения пойдут сразу, ещё до hello
+        bus.attach(ConnState(connection.id(), ticket.userId, ticket.username))
         if (firstConnection) presence.connected(ticket.userId)
         // ready шлём в ответ на hello
     }
@@ -76,8 +87,10 @@ class ChatSocket(
     @Blocking
     fun onClose() {
         val st = registry.get(connection.id()) ?: return
-        val left = registry.remove(connection.id())
-        if (left == 0) {
+        val left = bus.detach(connection.id())
+        // нода останавливается — человек сейчас переподключится к другой; offline на 20k человек
+        // разом здесь не пишем (если не вернётся — строку погасит проверка пульса через 3 минуты)
+        if (left == 0 && !bus.shuttingDown) {
             // последняя вкладка на этой ноде — гасим presence и звонки
             runCatching { calls.leaveAll(st.userId) }.onFailure { Log.error("leaveAll", it) }
             runCatching { presence.disconnected(st.userId) }.onFailure { Log.error("presence offline", it) }
@@ -96,9 +109,16 @@ class ChatSocket(
             return sendError(null, ErrorCodes.BAD_FRAME, "не смогли распарсить кадр: ${e.message?.take(200)}")
         }
 
+        // любое «живое» действие — человек здесь (ping шлёт сам клиент, это не действие)
+        if (env.t !in PASSIVE_FRAMES) {
+            runCatching { presence.touch(st.userId) }.onFailure { Log.warn("presence.touch", it) }
+        }
+
         try {
             when (env.t) {
                 FrameTypes.HELLO -> handleHello(st, env)
+                FrameTypes.ACTIVITY -> Unit // уже учли выше
+                FrameTypes.MESSAGE_FORWARD -> handleForward(st, env)
                 FrameTypes.CHAT_OPEN -> handleChatOpen(st, env)
                 FrameTypes.CHAT_CLOSE -> st.openChats.remove(codec.payloadAs(env, ChatCloseIn::class.java).chatId)
                 FrameTypes.MESSAGE_SEND -> handleMessageSend(st, env)
@@ -108,8 +128,8 @@ class ChatSocket(
                 FrameTypes.TYPING -> handleTyping(st, env)
                 FrameTypes.PRESENCE_SET -> handlePresenceSet(st, env)
                 FrameTypes.PRESENCE_QUERY -> handlePresenceQuery(st, env)
-                FrameTypes.ROOM_OPEN -> st.openRooms.add(codec.payloadAs(env, RoomOpenIn::class.java).ownerId)
-                FrameTypes.ROOM_CLOSE -> st.openRooms.remove(codec.payloadAs(env, RoomOpenIn::class.java).ownerId)
+                FrameTypes.ROOM_OPEN -> bus.openRoom(st.connectionId, codec.payloadAs(env, RoomOpenIn::class.java).ownerId)
+                FrameTypes.ROOM_CLOSE -> bus.closeRoom(st.connectionId, codec.payloadAs(env, RoomOpenIn::class.java).ownerId)
                 FrameTypes.PING -> send(FrameTypes.PONG, null, env.rid)
                 FrameTypes.REACTION_ADD, FrameTypes.REACTION_REMOVE -> handleReaction(st, env)
 
@@ -148,15 +168,22 @@ class ChatSocket(
     private fun handleHello(st: ConnState, env: Envelope) {
         val d = codec.payloadAs(env, HelloIn::class.java)
 
-        st.memberChats.clear()
-        st.memberChats.addAll(chats.memberChatIds(st.userId))
-
-        val ready = ReadyOut(
-            me = MeOut(st.userId, st.username),
-            chats = chats.summaries(st.userId),
-            missedFrom = chats.missedFrom(st.userId, d.chats.ifEmpty { st.memberChats.toList() }),
-            presence = presence.friendsSnapshot(st.userId),
-        )
+        // повторный hello (после resync) — заодно сверяем состав чатов
+        bus.refreshChats(listOf(st.userId))
+        // после рестарта ноды переподключаются все сразу — ограничиваем число одновременных hello
+        if (!HELLO_GATE.tryAcquire(10, java.util.concurrent.TimeUnit.SECONDS)) {
+            return sendError(env.rid, "busy", "сервер занят, повтори hello через пару секунд")
+        }
+        val ready = try {
+            ReadyOut(
+                me = MeOut(st.userId, st.username),
+                chats = chats.summaries(st.userId),
+                missedFrom = chats.missedFrom(st.userId, d.chats.ifEmpty { st.memberChats.toList() }),
+                presence = presence.friendsSnapshot(st.userId),
+            )
+        } finally {
+            HELLO_GATE.release()
+        }
         send(FrameTypes.READY, ready, env.rid)
     }
 
@@ -173,11 +200,29 @@ class ChatSocket(
         if (!st.sendBucket.tryTake()) {
             return sendError(rid, ErrorCodes.RATE_LIMITED, "не чаще 10 message.send в секунду")
         }
+        if (chats.roomType(d.chatId) == "stream") {
+            val now = System.currentTimeMillis()
+            if (now - st.lastStreamSendAt.get() < STREAM_SEND_EVERY_MS) {
+                return sendError(rid, ErrorCodes.RATE_LIMITED, "в чате эфира — не чаще раза в 2 секунды")
+            }
+            st.lastStreamSendAt.set(now)
+        }
         val ack = messages.send(
             d.chatId, st.userId, d.body, d.mediaId, d.clientToken, rid, mediaIds = d.mediaIds, trackIds = d.trackIds,
             extras = MessageExtras(replyToId = d.replyToId, gifId = d.gifId, stickerId = d.stickerId),
         )
         send(FrameTypes.MESSAGE_ACK, ack, rid)
+    }
+
+    /** message.forward — то же, что POST /api/chats/{chatId}/messages/forward; ответ — message.forwarded с тем же rid. */
+    private fun handleForward(st: ConnState, env: Envelope) {
+        val d = codec.payloadAs(env, MessageForwardIn::class.java)
+        if (!requireMember(st, d.chatId, env.rid)) return
+        val out = chatActions.forward(
+            st.userId, d.chatId,
+            org.example.rest.ForwardIn(d.messageIds, d.toChatIds, d.toUserIds, d.comment, d.hideAuthor),
+        )
+        send(FrameTypes.MESSAGE_FORWARDED, out, env.rid)
     }
 
     private fun handleReaction(st: ConnState, env: Envelope) {
@@ -207,7 +252,12 @@ class ChatSocket(
 
     private fun handleTyping(st: ConnState, env: Envelope) {
         val d = codec.payloadAs(env, TypingIn::class.java)
+        // не чаще раза в 1,5 с с одной вкладки; в чатах эфиров (тысячи зрителей) typing не рассылаем
+        val now = System.currentTimeMillis()
+        val prev = st.lastTypingAt.get()
+        if (now - prev < TYPING_EVERY_MS || !st.lastTypingAt.compareAndSet(prev, now)) return
         if (!requireMember(st, d.chatId, env.rid)) return
+        if (chats.roomType(d.chatId) == "stream") return
         val frame = Envelope(t = FrameTypes.TYPING, d = mapper.valueToTree(TypingOut(d.chatId, st.userId)))
         bus.publishToChat(d.chatId, frame, liveOnly = true)
     }
@@ -257,14 +307,15 @@ class ChatSocket(
     // ---------------------------------------------------------------- utils
 
     private fun requireMember(st: ConnState, chatId: UUID, rid: String?): Boolean {
-        // Всегда смотрим в БД (один запрос по PK): через REST человека могут
-        // добавить в чат или он может из него выйти — кэш на соединении врал бы.
+        // Состав чатов держит шина (загрузка при подключении + событие при каждом
+        // входе/выходе + сверка), поэтому обычно в БД не ходим. Нет в памяти —
+        // проверяем по БД: человек мог войти секунду назад, а событие ещё летит.
+        if (chatId in st.memberChats) return true
         if (chats.isMember(chatId, st.userId)) {
-            st.memberChats.add(chatId)
+            bus.addChat(st.connectionId, chatId)
             return true
         }
-        st.memberChats.remove(chatId)
-        st.openChats.remove(chatId)
+        bus.removeChat(st.connectionId, chatId)
         sendError(rid, ErrorCodes.NOT_A_MEMBER, "нет доступа к этой беседе")
         close(CloseCodes.FORBIDDEN, "no access to chat")
         return false

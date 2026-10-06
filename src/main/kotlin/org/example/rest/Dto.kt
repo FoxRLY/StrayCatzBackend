@@ -113,6 +113,8 @@ data class ChatListItemOut(
     val lastMessage: MessageOut?,
     /** Аватар: у группы — свой, у лички — собеседника. null — рисовать по имени. */
     val avatar: String? = null,
+    /** В каких моих папках лежит чат. */
+    val folderIds: List<UUID> = emptyList(),
 )
 
 data class ChatMemberOut(val user: UserShortOut, val lastReadSeq: Long, val joinedAt: Instant)

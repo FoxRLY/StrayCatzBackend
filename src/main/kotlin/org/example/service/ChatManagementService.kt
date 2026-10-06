@@ -50,7 +50,7 @@ class ChatManagementService(
 
     /** Мои чаты, свежие сверху: последнее сообщение, непрочитанные, собеседник для лички. */
     @Transactional
-    fun listMine(me: UUID): List<ChatListItemOut> {
+    fun listMine(me: UUID, folderId: UUID? = null): List<ChatListItemOut> {
         val memberships = ChatMember.list(
             // чаты стримов — не беседы: в список не попадают (у них своя страница)
             "id.userId = ?1 and isDeleted = false and id.chatId in " +
@@ -58,7 +58,24 @@ class ChatManagementService(
             me,
         )
         if (memberships.isEmpty()) return emptyList()
+        // мои папки: чат -> в каких папках лежит
+        @Suppress("UNCHECKED_CAST")
+        val folderRows = em.createNativeQuery(
+            """
+            select fc.chat_id, fc.folder_id from chat_folder_chat fc join chat_folder f on f.id = fc.folder_id
+            where f.user_id = ?1 order by f.position, fc.position
+            """.trimIndent(),
+        ).setParameter(1, me).resultList as List<Array<Any?>>
+        val foldersOf = folderRows.groupBy({ it[0] as UUID }) { it[1] as UUID }
+        if (folderId != null && folderRows.none { it[1] == folderId }) {
+            val exists = em.createNativeQuery("select 1 from chat_folder where id = ?1 and user_id = ?2")
+                .setParameter(1, folderId).setParameter(2, me).resultList.isNotEmpty()
+            if (!exists) throw ApiException.notFound("папка не найдена")
+            return emptyList()
+        }
         val chatIds = memberships.map { it.id.chatId }
+            .filter { folderId == null || folderId in (foldersOf[it] ?: emptyList()) }
+        if (chatIds.isEmpty()) return emptyList()
 
         val chats = Chat.list("id in ?1", chatIds).associateBy { it.id }
         val lastSeq = ChatSeqEntity.list("chatId in ?1", chatIds).associate { it.chatId to it.nextSeq - 1 }
@@ -73,7 +90,7 @@ class ChatManagementService(
         val peers = profiles.shorts(peerByChat.values)
 
         return memberships.mapNotNull { m ->
-            val chat = chats[m.id.chatId] ?: return@mapNotNull null
+            val chat = chats[m.id.chatId] ?: return@mapNotNull null // не в этой папке — chats его не содержит
             val last = lastSeq[chat.id] ?: 0L
             ChatListItemOut(
                 chatId = chat.id,
@@ -85,6 +102,7 @@ class ChatManagementService(
                 unread = (last - m.lastReadSeq).coerceAtLeast(0),
                 lastMessage = lastRendered[chat.id],
                 avatar = chat.avatar ?: peerByChat[chat.id]?.let { peers[it]?.avatar },
+                folderIds = foldersOf[chat.id] ?: emptyList(),
             )
         }.sortedByDescending { it.lastMessage?.createdAt ?: chats[it.chatId]?.createdAt ?: Instant.EPOCH }
     }
@@ -214,6 +232,7 @@ class ChatManagementService(
         val m = ChatMember.findById(ChatMemberId(chatId, me)) ?: return
         m.isDeleted = true
         m.deletedAt = Instant.now()
+        bus.membershipChanged(listOf(me))
         // уведомляем оставшихся и самого вышедшего (его вкладки уберут чат из списка)
         notify(activeMemberIds(chatId).filter { it != me } + me, chatId, "member_left", me)
     }
@@ -238,11 +257,13 @@ class ChatManagementService(
         val m = ChatMember.findById(ChatMemberId(chatId, userId))
         if (m == null) {
             ChatMember().also { it.id = ChatMemberId(chatId, userId) }.persist()
+            bus.membershipChanged(listOf(userId))
             return true
         }
         if (m.isDeleted) {
             m.isDeleted = false
             m.deletedAt = null
+            bus.membershipChanged(listOf(userId))
             return true
         }
         return false

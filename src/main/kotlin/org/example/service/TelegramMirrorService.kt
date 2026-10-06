@@ -39,6 +39,9 @@ class TelegramMirrorService(
     private val writer: TelegramMirrorWriter,
     @ConfigProperty(name = "straycatz.telegram.mirror.enabled", defaultValue = "true") private val enabled: Boolean,
     @ConfigProperty(name = "straycatz.telegram.mirror.per-user-per-day", defaultValue = "5") private val perUserPerDay: Int,
+    /** Сколько каналов забирать за тик (раз в минуту) и сколько качать одновременно. */
+    @ConfigProperty(name = "straycatz.telegram.mirror.batch", defaultValue = "20") private val batch: Int,
+    @ConfigProperty(name = "straycatz.telegram.mirror.parallel", defaultValue = "4") private val parallel: Int,
 ) {
     companion object {
         val SYSTEM_USER: UUID = UUID.fromString("00000000-0000-0000-0000-00000000007e")
@@ -140,16 +143,33 @@ class TelegramMirrorService(
         writer.synced(ch.id, last, if (metaDue) first.info else null)
     }
 
-    @Scheduled(every = "2m", delayed = "30s", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
+    /**
+     * Раз в минуту: забираем до [batch] каналов, которым пора, и синхронизируем
+     * по [parallel] одновременно. Каналы «бронируются» (sync_lease_until) через
+     * SKIP LOCKED — несколько нод не возьмут один и тот же канал.
+     * Пропускная способность одной ноды ≈ batch каналов в минуту.
+     */
+    @Scheduled(every = "1m", delayed = "30s", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     fun tick() {
         if (!enabled) return
-        writer.due(SYNC_EVERY, 5).forEach { id ->
-            try {
-                sync(id)
-            } catch (e: Exception) {
-                Log.warnf("зеркало %s: %s", id, e.message)
-                writer.failed(id, e.message ?: e.javaClass.simpleName)
+        val ids = writer.claim(SYNC_EVERY, batch.coerceIn(1, 200))
+        if (ids.isEmpty()) return
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(parallel.coerceIn(1, 16).coerceAtMost(ids.size))
+        try {
+            ids.forEach { id ->
+                pool.submit {
+                    try {
+                        sync(id)
+                    } catch (e: Exception) {
+                        Log.warnf("зеркало %s: %s", id, e.message)
+                        runCatching { writer.failed(id, e.message ?: e.javaClass.simpleName) }
+                    }
+                }
             }
+        } finally {
+            pool.shutdown()
+            // не дольше 4 минут — бронь каналов 5 минут
+            if (!pool.awaitTermination(4, java.util.concurrent.TimeUnit.MINUTES)) pool.shutdownNow()
         }
     }
 }
@@ -246,16 +266,38 @@ class TelegramMirrorWriter(
         }
         post.persist()
         attachments.attach(AttachmentService.Owner.POST, post.id, files)
+        titleVideos(communityId, p.id, files)
         tags.sync(TagService.Owner.POST, post.id, null, post.body)
         em.createNativeQuery("insert into telegram_post (channel_id, tg_post_id, post_id) values (?1, ?2, ?3)")
             .setParameter(1, channelId).setParameter(2, p.id).setParameter(3, post.id).executeUpdate()
+    }
+
+    /**
+     * У видео из канала нет названия — подписываем «Название канала 123» (номер
+     * поста в канале), чтобы во вкладке «видео» и в поиске не было безымянных.
+     * Несколько видео в одном посте — «… 123 (2)».
+     */
+    private fun titleVideos(communityId: UUID, tgPostId: Long, files: List<Media>) {
+        val videos = files.filter { it.contentType.startsWith("video/") }
+        if (videos.isEmpty()) return
+        val name = Community.findById(communityId)?.name ?: return
+        videos.forEachIndexed { i, m ->
+            val title = (name + " " + tgPostId + if (videos.size > 1) " (${i + 1})" else "").take(200)
+            em.createNativeQuery(
+                """
+                insert into video_meta (media_id, title) values (?1, ?2)
+                on conflict (media_id) do update set title = coalesce(nullif(video_meta.title, ''), excluded.title), updated_at = now()
+                """.trimIndent(),
+            ).setParameter(1, m.id).setParameter(2, title).executeUpdate()
+        }
     }
 
     /** Отметить успешную синхронизацию; info — заодно обновить шапку (раз в сутки). */
     @Transactional
     fun synced(channelId: UUID, lastPostId: Long, info: TgChannelInfo?) {
         em.createNativeQuery(
-            "update telegram_channel set last_post_id = greatest(last_post_id, ?2), last_synced_at = now(), last_error = null, errors_in_row = 0 where id = ?1",
+            "update telegram_channel set idle_streak = case when ?2 > last_post_id then 0 else idle_streak + 1 end, " +
+                "last_post_id = greatest(last_post_id, ?2), last_synced_at = now(), last_error = null, errors_in_row = 0, sync_lease_until = null where id = ?1",
         ).setParameter(1, channelId).setParameter(2, lastPostId).executeUpdate()
         if (info == null) return
         val communityId = em.createNativeQuery("select community_id from telegram_channel where id = ?1", UUID::class.java)
@@ -274,9 +316,37 @@ class TelegramMirrorWriter(
     @Transactional
     fun failed(channelId: UUID, error: String) {
         em.createNativeQuery(
-            "update telegram_channel set last_synced_at = now(), last_error = ?2, errors_in_row = errors_in_row + 1 where id = ?1",
+            "update telegram_channel set last_synced_at = now(), last_error = ?2, errors_in_row = errors_in_row + 1, sync_lease_until = null where id = ?1",
         ).setParameter(1, channelId).setParameter(2, error.take(500)).executeUpdate()
     }
+
+    /**
+     * Забронировать каналы, которым пора, на 5 минут (SKIP LOCKED: параллельные
+     * ноды берут разные). Никогда не синхронизированные — первыми; после 10
+     * ошибок подряд — раз в 6 часов.
+     */
+    @Suppress("UNCHECKED_CAST")
+    @Transactional
+    fun claim(every: Duration, n: Int): List<UUID> =
+        em.createNativeQuery(
+            """
+            with due as (
+                select t.id from telegram_channel t join community c on c.id = t.community_id and not c.is_deleted
+                where not t.paused and c.source = 'telegram'
+                  and (t.sync_lease_until is null or t.sync_lease_until < now())
+                  and (t.last_synced_at is null
+                       -- «тихий» канал (ничего нового N раз подряд) — реже, но не реже раза в час
+                       or (t.errors_in_row < 10 and t.last_synced_at < now() - make_interval(secs => ?1 * least(1 + t.idle_streak, 6)))
+                       or t.last_synced_at < now() - interval '6 hours')
+                order by t.last_synced_at nulls first limit ?2
+                for update of t skip locked
+            ), claimed as (
+                update telegram_channel t set sync_lease_until = now() + interval '5 minutes'
+                from due where t.id = due.id returning t.id
+            ) select id from claimed
+            """.trimIndent(),
+            UUID::class.java,
+        ).setParameter(1, every.seconds.toDouble()).setParameter(2, n).resultList as List<UUID>
 
     /** Кого пора синхронизировать: никогда не синхронизированные первыми; после 10 ошибок подряд — раз в 6 часов. */
     @Suppress("UNCHECKED_CAST")

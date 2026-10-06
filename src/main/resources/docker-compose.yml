@@ -10,6 +10,13 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  # Шина событий между нодами (pub/sub). Данные не хранит — volume не нужен.
+  redis:
+    image: redis:7-alpine
+    command: [ "redis-server", "--save", "", "--appendonly", "no", "--maxclients", "20000" ]
+    ports:
+      - "6379:6379"
+
   keycloak:
     image: quay.io/keycloak/keycloak:26.3
     command: [ "start-dev", "--import-realm" ]

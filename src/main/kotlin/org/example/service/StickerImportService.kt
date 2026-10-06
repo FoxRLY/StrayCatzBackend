@@ -27,6 +27,7 @@ class StickerImportService(
     private val bot: TelegramBot,
     private val stickers: StickerService,
     private val writer: StickerImportWriter,
+    private val lease: JobLease,
 ) {
     companion object {
         private val NAME = Regex("^[A-Za-z0-9_]{1,64}$")
@@ -58,6 +59,7 @@ class StickerImportService(
     @Scheduled(every = "5s", delayed = "20s", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     fun tick() {
         if (!bot.configured()) return
+        if (!lease.acquire("sticker-import", java.time.Duration.ofSeconds(30))) return
         val job = writer.next() ?: return
         val (packId, items, done) = job
         val batch = items.drop(done).take(10)

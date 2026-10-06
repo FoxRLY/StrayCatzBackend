@@ -88,6 +88,7 @@ class VideoPosterService(
     private val storage: MediaStorage,
     private val media: MediaService,
     private val writer: VideoMetaWriter,
+    private val lease: JobLease,
 ) {
     fun onVideoUploaded(@Observes e: VideoUploaded) {
         if (!ffmpeg.available()) return
@@ -119,6 +120,7 @@ class VideoPosterService(
     @Scheduled(every = "5m", delayed = "1m", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     fun backfill() {
         if (!ffmpeg.available()) return
+        if (!lease.acquire("video-poster-backfill", java.time.Duration.ofMinutes(15))) return
         writer.pending(3).forEach { (mediaId, ownerId, key) ->
             val tmp = Files.createTempFile("video-", ".bin")
             try {
@@ -183,6 +185,7 @@ class VideoMetaWriter(private val em: EntityManager) {
  */
 @ApplicationScoped
 class StreamThumbnailJob(
+    private val lease: JobLease,
     private val ffmpeg: Ffmpeg,
     private val storage: MediaStorage,
     private val streams: StreamService,
@@ -194,6 +197,7 @@ class StreamThumbnailJob(
     @Scheduled(every = "20s", delayed = "15s", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     fun snap() {
         if (!enabled || !ffmpeg.available()) return
+        if (!lease.acquire("stream-thumbnails", java.time.Duration.ofSeconds(60))) return // ffmpeg — на одной ноде
         streams.thumbTargets(15).forEach { (id, code) ->
             val jpg = Files.createTempFile("thumb-", ".jpg")
             try {

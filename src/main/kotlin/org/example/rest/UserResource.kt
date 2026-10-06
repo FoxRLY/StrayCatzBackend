@@ -19,6 +19,7 @@ import org.example.service.AccountService
 import org.example.service.CommunityService
 import org.example.service.MediaService
 import org.example.service.RoomService
+import org.example.service.XpService
 import org.example.service.UserProfileService
 import org.jboss.resteasy.reactive.RestForm
 import org.jboss.resteasy.reactive.multipart.FileUpload
@@ -34,9 +35,24 @@ class UserResource(
     private val communities: CommunityService,
     private val media: MediaService,
     private val rooms: RoomService,
+    private val xp: XpService,
     @ConfigProperty(name = "straycatz.media.max-avatar-bytes", defaultValue = "5242880")
     private val maxAvatarBytes: Long,
 ) {
+
+    /** Мой опыт: уровень и история начислений (свежие сверху, дальше — ?before=<at>). */
+    @GET
+    @Path("/me/xp")
+    fun myXp(
+        @HeaderParam("Authorization") authorization: String?,
+        @QueryParam("before") before: String?,
+        @QueryParam("limit") @DefaultValue("50") limit: Int,
+    ): XpPageOut {
+        val at = before?.takeIf { it.isNotBlank() }?.let {
+            runCatching { java.time.Instant.parse(it) }.getOrElse { throw ApiException.badRequest("invalid_before", "before — ISO-время") }
+        }
+        return xp.history(currentUser.require(authorization).userId, at, limit)
+    }
 
     /** Свой профиль (+ email). */
     @GET

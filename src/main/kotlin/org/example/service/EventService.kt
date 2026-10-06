@@ -71,9 +71,7 @@ class EventService(
         tags.sync(TagService.Owner.EVENT, e.id, req.tags, e.title, e.description)
 
         val payload = payload(e, c)
-        communities.memberIds(c.id).filter { it != me }.forEach {
-            notifications.notify(it, NotificationService.EVENT_NEW, me, payload)
-        }
+        notifications.notifyMany(communities.memberIds(c.id).filter { it != me }, NotificationService.EVENT_NEW, me, payload)
         return toOut(listOf(e), me).first()
     }
 
@@ -93,9 +91,10 @@ class EventService(
         communities.requireRole(c, me, "admin")
         if (e.cancelledAt != null) return
         e.cancelledAt = Instant.now()
-        EventRegistration.list("id.eventId = ?1", e.id).map { it.id.userId }.filter { it != me }.forEach {
-            notifications.notify(it, NotificationService.EVENT_CANCELLED, me, payload(e, c))
-        }
+        notifications.notifyMany(
+            EventRegistration.list("id.eventId = ?1", e.id).map { it.id.userId }.filter { it != me },
+            NotificationService.EVENT_CANCELLED, me, payload(e, c),
+        )
     }
 
     /** «Пойду». Только участники сообщества. Приходит уведомление-подтверждение. */
@@ -137,11 +136,19 @@ class EventService(
         )
         for (e in soon) {
             val c = Community.findById(e.communityId) ?: continue
-            val pending = EventRegistration.list("id.eventId = ?1 and remindedAt is null", e.id)
-            for (r in pending) {
-                notifications.notify(r.id.userId, NotificationService.EVENT_REMINDER, null, payload(e, c))
-                r.remindedAt = now
-            }
+            // забираем атомарно: при нескольких нодах напоминание уйдёт один раз
+            @Suppress("UNCHECKED_CAST")
+            val pending = em.createNativeQuery(
+                """
+                with r as (
+                    update event_registration set reminded_at = now()
+                    where event_id = ?1 and reminded_at is null
+                    returning user_id
+                ) select user_id from r
+                """.trimIndent(),
+                UUID::class.java,
+            ).setParameter(1, e.id).resultList as List<UUID>
+            notifications.notifyMany(pending, NotificationService.EVENT_REMINDER, null, payload(e, c))
             if (pending.isNotEmpty()) Log.debugf("напомнили о «%s» %d людям", e.title, pending.size)
         }
     }
@@ -219,7 +226,9 @@ class EventService(
 }
 
 @ApplicationScoped
-class EventReminderJob(private val events: EventService) {
+class EventReminderJob(private val events: EventService, private val lease: JobLease) {
     @Scheduled(every = "60s", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
-    fun remind() = events.sendReminders()
+    fun remind() {
+        if (lease.acquire("event-reminders", java.time.Duration.ofMinutes(3))) events.sendReminders()
+    }
 }

@@ -418,10 +418,11 @@ class GifService(
  * транзакции на каждую гифку шли через прокси GifService.
  */
 @ApplicationScoped
-class GifWarmUpJob(private val gifs: GifService) {
+class GifWarmUpJob(private val gifs: GifService, private val lease: JobLease) {
     @Scheduled(every = "10m", delayed = "2m", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     fun warmUp() {
         if (!gifs.hasProvider()) return
+        if (!lease.acquire("gif-warmup", java.time.Duration.ofMinutes(30))) return
         gifs.pending(20).forEach { (id, url, owner) ->
             try {
                 gifs.downloadTx(owner, id, url)

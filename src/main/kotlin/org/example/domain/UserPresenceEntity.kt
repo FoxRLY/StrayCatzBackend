@@ -25,6 +25,18 @@ class UserPresenceEntity : PanacheEntityBase {
     @Column(name = "position_sec")
     var positionSec: Int? = null
 
+    /** Выставлено руками: away / dnd / invisible или null. */
+    @Column(name = "manual_status")
+    var manualStatus: String? = null
+
+    /** Последнее действие человека. */
+    @Column(name = "last_active_at")
+    var lastActiveAt: Instant = Instant.now()
+
+    /** Последний пульс ноды, у которой открыт его сокет. */
+    @Column(name = "seen_at")
+    var seenAt: Instant = Instant.now()
+
     @Column(name = "updated_at")
     var updatedAt: Instant = Instant.now()
 

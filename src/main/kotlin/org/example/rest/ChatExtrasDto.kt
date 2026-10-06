@@ -133,7 +133,14 @@ data class ForwardIn(
     val toUserIds: List<UUID> = emptyList(),
     /** Подпись — уходит отдельным сообщением перед пересланными. */
     val comment: String? = null,
+    /** «Скрыть автора»: копии без «переслано от», как будто написал я. */
+    val hideAuthor: Boolean = false,
 )
+
+/** Выбранные сообщения: POST …/messages/delete. */
+data class MessageIdsIn(val messageIds: List<UUID> = emptyList())
+
+data class DeleteManyOut(val deleted: List<UUID>, val skipped: List<UUID>)
 
 data class ForwardSentOut(val chatId: UUID, val userId: UUID?, val messageIds: List<UUID>, val lastSeq: Long)
 
@@ -145,3 +152,24 @@ data class ForwardResultOut(val sent: List<ForwardSentOut>)
 data class ChatPatchIn(val name: String? = null)
 
 data class ChatAvatarIn(val mediaId: UUID? = null)
+
+// ================================================================ папки чатов
+
+/** POST/PATCH /api/chats/folders. */
+data class ChatFolderIn(val title: String? = null, val emoji: String? = null, val chatIds: List<UUID>? = null)
+
+data class ChatFolderOrderIn(val folderIds: List<UUID> = emptyList())
+
+data class ChatFolderOut(
+    val id: UUID,
+    val title: String,
+    /** Иконка — один эмодзи или null. */
+    val emoji: String?,
+    val position: Int,
+    /** Мои чаты в папке (свежие сверху, как в GET /api/chats). */
+    val chatIds: List<UUID>,
+    /** Непрочитанных сообщений во всех чатах папки — для бейджа на вкладке. */
+    val unread: Long,
+    /** Сколько чатов с непрочитанным. */
+    val unreadChats: Int,
+)

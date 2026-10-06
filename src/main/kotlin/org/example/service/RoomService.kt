@@ -58,6 +58,7 @@ class RoomService(
     private val media: MediaService,
     private val notifications: NotificationService,
     private val attachments: AttachmentService,
+    private val badges: BadgeService,
 ) {
     companion object {
         val THEMES = setOf("dvor", "fonar", "led", "malina")
@@ -369,6 +370,7 @@ class RoomService(
         attachments.attachTracks(AttachmentService.Owner.GUESTBOOK, entry.id, tracks)
 
         if (me != owner.id) {
+            badges.mark(owner.id) // «Гостевая»
             notifications.notify(
                 owner.id, NotificationService.GUESTBOOK_ENTRY, me,
                 mapOf("entryId" to entry.id.toString(), "preview" to text.ifEmpty { "[картинка]" }.take(100)),
@@ -433,6 +435,7 @@ class RoomService(
     private fun touched(room: Room, what: String, detail: String? = null): RoomOut {
         room.updatedAt = Instant.now()
         detail?.let { logActivity(room.ownerId, it) }
+        badges.mark(room.ownerId) // «Своими руками»
         pushRoomUpdated(room.ownerId, what)
         val me = AppUser.findById(room.ownerId) ?: throw ApiException.notFound("пользователь не найден")
         return view(me.id, me.username)

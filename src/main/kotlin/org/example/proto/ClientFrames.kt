@@ -32,6 +32,16 @@ data class MessageSendIn(
     val stickerId: UUID? = null,
 )
 
+/** message.forward: переслать выбранные сообщения чата chatId. */
+data class MessageForwardIn(
+    val chatId: UUID,
+    val messageIds: List<UUID> = emptyList(),
+    val toChatIds: List<UUID> = emptyList(),
+    val toUserIds: List<UUID> = emptyList(),
+    val comment: String? = null,
+    val hideAuthor: Boolean = false,
+)
+
 /** reaction.add / reaction.remove — то же, что PUT/DELETE …/reactions/{emoji}. */
 data class ReactionIn(val chatId: UUID, val messageId: UUID, val emoji: String)
 

@@ -97,6 +97,16 @@ class PostResource(
     fun comment(@HeaderParam("Authorization") auth: String?, @PathParam("id") id: UUID, req: CommentIn?): Response =
         Response.status(201).entity(posts.comment(me(auth), id, req ?: CommentIn())).build()
 
+    /** Кнопка «ИИ слоп»: голос. При ≥20% от просмотревших — плашка aiSlop. */
+    @PUT
+    @Path("/{id}/slop")
+    fun slop(@HeaderParam("Authorization") auth: String?, @PathParam("id") id: UUID): SlopOut = posts.slopVote(me(auth), id)
+
+    /** Снять свой голос (плашку это не снимает). */
+    @DELETE
+    @Path("/{id}/slop")
+    fun unslop(@HeaderParam("Authorization") auth: String?, @PathParam("id") id: UUID): SlopOut = posts.slopUnvote(me(auth), id)
+
     private fun me(auth: String?): UUID = currentUser.require(auth).userId
 }
 

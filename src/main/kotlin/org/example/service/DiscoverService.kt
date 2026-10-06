@@ -76,18 +76,18 @@ class DiscoverService(
             }
             "global" -> {
                 @Suppress("UNCHECKED_CAST")
-                val byStatus = (em.createNativeQuery(
+                val byStatus = globalOnline.get("byStatus") { (em.createNativeQuery(
                     """
                     select up.status, count(*) from user_presence up join users u on u.id = up.user_id and not u.is_deleted
-                    where up.status in ('online', 'away', 'dnd') group by up.status
+                    where up.status in ('online', 'away', 'dnd') and up.seen_at > now() - interval '3 minutes' group by up.status
                     """.trimIndent(),
-                ).resultList as List<Array<Any?>>).associate { it[0] as String to (it[1] as Number).toLong() }
+                ).resultList as List<Array<Any?>>).associate { it[0] as String to (it[1] as Number).toLong() } }
                 // сначала друзья, потом остальные — свежие смены статуса сверху
                 @Suppress("UNCHECKED_CAST")
                 val ids = em.createNativeQuery(
                     """
                     select up.user_id from user_presence up join users u on u.id = up.user_id and not u.is_deleted
-                    where up.status in ('online', 'away', 'dnd') and up.user_id <> ?1
+                    where up.status in ('online', 'away', 'dnd') and up.seen_at > now() - interval '3 minutes' and up.user_id <> ?1
                     order by (${if (fr.isEmpty()) "up.user_id is null" else "up.user_id in (?3)"}) desc, up.updated_at desc limit ?2
                     """.trimIndent(),
                     UUID::class.java,
@@ -144,6 +144,11 @@ class DiscoverService(
      * репост 3, лайк 1, просмотр видео 1, идущий эфир 5. heat — доля от лидера.
      * Если в последний час тихо, окно расширяется до суток и недели.
      */
+    /** Глобальное одинаково для всех — считаем раз в 30 с на ноду, а не на каждого смотрящего. */
+    private val globalTrending = TtlCache<Int, TrendingWidgetOut>(30_000)
+    private val globalTicker = TtlCache<Int, List<TickerItemOut>>(30_000)
+    private val globalOnline = TtlCache<String, Map<String, Long>>(15_000)
+
     @Suppress("UNCHECKED_CAST")
     @Transactional
     fun trending(me: UUID, scope: String, limit: Int): TrendingWidgetOut {
@@ -153,6 +158,12 @@ class DiscoverService(
             else -> throw ApiException.badRequest("invalid_scope", "scope: global или mine")
         }
         val size = limit.coerceIn(1, 30)
+        if (!mine) return globalTrending.get(size) { trendingUncached(me, false, size) }
+        return trendingUncached(me, true, size)
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun trendingUncached(me: UUID, mine: Boolean, size: Int): TrendingWidgetOut {
         val fr = friends.friendIdsOf(me)
         var rows: List<Array<Any?>> = emptyList()
         var used = WINDOWS.first().second
@@ -312,7 +323,9 @@ class DiscoverService(
         return TickerOut(out, Instant.now(), refreshInSec = 60)
     }
 
-    private fun tickerGlobal(me: UUID, n: Int): List<TickerItemOut> {
+    private fun tickerGlobal(me: UUID, n: Int): List<TickerItemOut> = globalTicker.get(n) { tickerGlobalUncached(me, n) }
+
+    private fun tickerGlobalUncached(me: UUID, n: Int): List<TickerItemOut> {
         val items = mutableListOf<TickerItemOut>()
         trending(me, "global", 4).items.forEach {
             items += TickerItemOut("tag:${it.tag}", "tag", "global", "#${it.tag} — обсуждают ${it.where}", it.link, null, it.heat)

@@ -22,7 +22,7 @@ class AttachmentService(
     private val media: MediaService,
     private val music: MusicService,
 ) {
-    enum class Owner(val db: String) { POST("post"), COMMENT("comment"), MESSAGE("message"), GUESTBOOK("guestbook") }
+    enum class Owner(val db: String) { POST("post"), COMMENT("comment"), MESSAGE("message"), GUESTBOOK("guestbook"), MARKET("market") }
 
     companion object {
         const val MAX_ATTACHMENTS = 4

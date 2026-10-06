@@ -34,6 +34,8 @@ data class MessageExtras(
     /** Пересылка: без проверок «моё ли» — гифка/стикер/треки копируются как были. */
     val forward: ForwardMeta? = null,
     val forwardTrackIds: List<UUID> = emptyList(),
+    /** Копия чужого сообщения без «переслано от» (пересылка со скрытым автором): тоже без проверок и без повторных упоминаний. */
+    val copied: Boolean = false,
 )
 class ForbiddenException(message: String) : RuntimeException(message)
 
@@ -46,6 +48,7 @@ class MessageService(
     private val gifs: GifService,
     private val stickers: StickerService,
     private val mentions: MentionService,
+    private val chats: ChatService,
 ) {
     companion object { const val MAX_BODY_LEN = 4000 }
 
@@ -80,8 +83,9 @@ class MessageService(
         val tracks = attachments.validateTracks(userId, trackIds) + extras.forwardTrackIds
         val fwd = extras.forward
         // гифка и стикер: при пересылке берём как есть, иначе — проверка и «недавние» + кэш файла
-        val gifId = extras.gifId?.let { if (fwd != null) it else gifs.use(userId, it) }
-        val stickerId = extras.stickerId?.let { if (fwd != null) it else stickers.use(userId, it) }
+        val asIs = fwd != null || extras.copied
+        val gifId = extras.gifId?.let { if (asIs) it else gifs.use(userId, it) }
+        val stickerId = extras.stickerId?.let { if (asIs) it else stickers.use(userId, it) }
         if (gifId != null && stickerId != null) throw MessageValidationException("в одном сообщении — гифка или стикер, не оба")
         val replyTo = extras.replyToId?.let { rid2 ->
             Message.findById(rid2)?.takeIf { it.chatId == chatId }?.id
@@ -115,7 +119,7 @@ class MessageService(
         attachments.attachTracks(AttachmentService.Owner.MESSAGE, message.id, tracks)
 
         // @ник — только участникам этого чата; пересланное чужое никого не упоминает заново
-        if (fwd == null) syncMentions(message)
+        if (!asIs) syncMentions(message)
 
         // своё сообщение считаем прочитанным — иначе оно висит в unread у автора
         ChatMember.findById(ChatMemberId(chatId, userId))?.let { if (it.lastReadSeq < message.seq) it.lastReadSeq = message.seq }
@@ -149,7 +153,12 @@ class MessageService(
         member.lastReadSeq = seq
 
         val frame = Envelope(t = FrameTypes.CHAT_READ, d = mapper.valueToTree(ChatReadOut(chatId, userId, seq)))
-        bus.publishToChat(chatId, frame)
+        // в личке и группе — всем (галочки «прочитано»); в чатах эфиров и обсуждениях сообществ
+        // (тысячи участников) — только своим вкладкам, иначе каждое прочтение летело бы всем
+        when (chats.roomType(chatId)) {
+            "stream", "community" -> bus.publishToUsers(listOf(userId), frame)
+            else -> bus.publishToChat(chatId, frame)
+        }
     }
 
     /**

@@ -14,6 +14,8 @@ import jakarta.ws.rs.Produces
 import jakarta.ws.rs.QueryParam
 import jakarta.ws.rs.core.MediaType
 import jakarta.ws.rs.core.Response
+import org.example.service.BadgeService
+import org.example.service.DoingService
 import org.example.service.RoomService
 import java.time.Instant
 import java.time.format.DateTimeParseException
@@ -29,6 +31,8 @@ import java.util.UUID
 class RoomResource(
     private val currentUser: CurrentUser,
     private val rooms: RoomService,
+    private val doing: DoingService,
+    private val badges: BadgeService,
 ) {
     // ------------------------------------------------------------ смотреть
 
@@ -51,6 +55,31 @@ class RoomResource(
     @Path("/{username}/invite")
     fun invite(@HeaderParam("Authorization") auth: String?, @PathParam("username") username: String): InviteOut =
         rooms.invite(currentUser.require(auth).userId, username)
+
+    /**
+     * Вкладка «чем занят»: саммари за [days] дней (только на первой странице)
+     * и последние действия. Дальше — ?before=<at последнего>.
+     */
+    @GET
+    @Path("/{username}/doing")
+    fun doing(
+        @HeaderParam("Authorization") auth: String?,
+        @PathParam("username") username: String,
+        @QueryParam("days") @DefaultValue("30") days: Int,
+        @QueryParam("before") before: String?,
+        @QueryParam("limit") @DefaultValue("30") limit: Int,
+    ): DoingOut {
+        val me = currentUser.require(auth)
+        return doing.of(resolve(username, me.username), days, parseInstant(before), limit)
+    }
+
+    /** Вкладка «значки»: все значки с прогрессом, «4 из 6», уровень. */
+    @GET
+    @Path("/{username}/badges")
+    fun badges(@HeaderParam("Authorization") auth: String?, @PathParam("username") username: String): BadgesOut {
+        val me = currentUser.require(auth)
+        return badges.of(resolve(username, me.username))
+    }
 
     /** Все друзья хозяина (блок «друзья» показывает первые 12). */
     @GET

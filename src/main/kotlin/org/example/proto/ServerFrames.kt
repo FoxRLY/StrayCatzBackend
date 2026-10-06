@@ -120,6 +120,8 @@ data class PresenceOut(
     val status: String,
     val doing: String? = null,
     val listening: ListeningOut? = null,
+    /** Последнее действие: «был(а) 5 минут назад». У invisible — null. */
+    val lastSeenAt: java.time.Instant? = null,
 )
 
 data class PresenceSnapshotOut(val users: List<PresenceOut>)

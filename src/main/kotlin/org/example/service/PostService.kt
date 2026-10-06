@@ -25,6 +25,7 @@ import org.example.rest.ReadOut
 import org.example.rest.ShareIn
 import org.example.rest.ShareOut
 import org.example.rest.ShareSentOut
+import org.example.rest.SlopOut
 import org.example.rest.WallPostIn
 import org.example.rest.UpvoteBudgetOut
 import org.example.rest.UpvoteOut
@@ -62,6 +63,13 @@ class PostService(
     private val chatAdmin: ChatManagementService,
     private val tags: TagService,
     private val mentionsSvc: MentionService,
+    private val xp: XpService,
+    private val badges: BadgeService,
+    private val viewCounter: ViewCounter,
+    @org.eclipse.microprofile.config.inject.ConfigProperty(name = "straycatz.posts.slop-percent", defaultValue = "20")
+    private val slopPercent: Int,
+    @org.eclipse.microprofile.config.inject.ConfigProperty(name = "straycatz.posts.slop-min-votes", defaultValue = "5")
+    private val slopMinVotes: Int,
 ) {
     companion object {
         const val UPVOTES_PER_DAY = 5
@@ -75,6 +83,8 @@ class PostService(
         const val HOT_PER_MINUTE = 5
         val READ_TTL: Duration = Duration.ofMinutes(5)
         val KINDS = setOf("text", "image", "video", "track", "guide")
+        /** Автору: на его запись повесили плашку «ИИ слоп». payload: {postId, votes, views} */
+        const val AI_SLOP = "post_ai_slop"
     }
 
     // ================================================================ чтение
@@ -298,6 +308,9 @@ class PostService(
         }
         em.createNativeQuery("insert into post_upvote (post_id, user_id) values (?1, ?2)")
             .setParameter(1, id).setParameter(2, me).executeUpdate()
+        // опыт автору: стена — 5, сообщество — 2 (не за записи от имени сообщества и не за зеркала)
+        xp.forUpvote(p.id, p.authorId, me, p.communityId, p.asCommunity, p.sourceUrl != null)
+        badges.mark(p.authorId)
         return UpvoteOut(count("select count(*) from post_upvote where post_id = ?1", id), true, UPVOTES_PER_DAY - used - 1)
     }
 
@@ -333,6 +346,7 @@ class PostService(
     @Transactional
     fun read(me: UUID, id: UUID): ReadOut {
         val p = activePost(id)
+        countView(p, me)
         em.createNativeQuery(
             """
             insert into post_read (post_id, user_id, community_id, read_at) values (?1, ?2, ?3, now())
@@ -340,6 +354,72 @@ class PostService(
             """.trimIndent(),
         ).setParameter(1, id).setParameter(2, me).setParameter(3, p.communityId).executeUpdate()
         return ReadOut(count("select count(*) from post_read where post_id = ?1 and read_at > now() - interval '5 minutes'", id))
+    }
+
+    /** Первое прочтение (за сутки) — +1 к просмотрам записи. */
+    private fun countView(p: Post, me: UUID) {
+        if (p.authorId == me) return
+        if (exists("select 1 from post_read where post_id = ?1 and user_id = ?2", p.id, me)) return
+        viewCounter.add(p.id) // в базу — пачкой раз в 10 с
+    }
+
+    // ================================================================ «ИИ слоп»
+
+    /**
+     * Кнопка «ИИ слоп». Если в момент нажатия голосов набралось не меньше
+     * [slopPercent]% от просмотревших (и не меньше [slopMinVotes] голосов),
+     * на запись навсегда вешается плашка: aiSlop = true. Голос можно снять,
+     * плашку — нет (только вручную в базе).
+     */
+    @Transactional
+    fun slopVote(me: UUID, id: UUID): SlopOut {
+        val p = activePost(id)
+        if (p.authorId == me) throw ApiException.badRequest("own_post", "за свою запись голосовать нельзя")
+        // проголосовал — значит видел: засчитываем просмотр, если он ещё не учтён
+        countView(p, me)
+        em.createNativeQuery(
+            """
+            insert into post_read (post_id, user_id, community_id, read_at) values (?1, ?2, ?3, now())
+            on conflict (post_id, user_id) do nothing
+            """.trimIndent(),
+        ).setParameter(1, id).setParameter(2, me).setParameter(3, p.communityId).executeUpdate()
+        em.createNativeQuery("insert into post_slop_vote (post_id, user_id) values (?1, ?2) on conflict do nothing")
+            .setParameter(1, id).setParameter(2, me).executeUpdate()
+        val out = slop(id, me)
+        if (!out.aiSlop && out.votes >= slopMinVotes && out.votes * 100 >= out.views * slopPercent) {
+            val marked = em.createNativeQuery("update post set ai_slop_at = now() where id = ?1 and ai_slop_at is null")
+                .setParameter(1, id).executeUpdate()
+            if (marked > 0 && !p.asCommunity) {
+                notifications.notify(p.authorId, AI_SLOP, null, mapOf("postId" to id, "votes" to out.votes, "views" to out.views))
+            }
+            return slop(id, me)
+        }
+        return out
+    }
+
+    @Transactional
+    fun slopUnvote(me: UUID, id: UUID): SlopOut {
+        activePost(id)
+        em.createNativeQuery("delete from post_slop_vote where post_id = ?1 and user_id = ?2")
+            .setParameter(1, id).setParameter(2, me).executeUpdate()
+        return slop(id, me)
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun slop(id: UUID, me: UUID): SlopOut {
+        val row = em.createNativeQuery("select views, ai_slop_at from post where id = ?1").setParameter(1, id).singleResult as Array<Any?>
+        val votes = count("select count(*) from post_slop_vote where post_id = ?1", id)
+        // просмотров не меньше, чем голосов (старые записи до V15 могли недосчитать)
+        val views = maxOf((row[0] as Number).toLong() + viewCounter.pendingFor(id), votes)
+        return SlopOut(
+            aiSlop = row[1] != null,
+            votes = votes,
+            views = views,
+            percent = if (views == 0L) 0 else (votes * 100 / views).toInt(),
+            threshold = slopPercent,
+            minVotes = slopMinVotes,
+            voted = exists("select 1 from post_slop_vote where post_id = ?1 and user_id = ?2", id, me),
+        )
     }
 
     /**
@@ -533,6 +613,13 @@ class PostService(
             ids,
         )
         val myUp = mine("select post_id from post_upvote where user_id = ?2 and post_id in (?1)", ids, me)
+        val slopVotes = counts("select post_id, count(*) from post_slop_vote where post_id in (?1) group by post_id", ids)
+        val mySlop = mine("select post_id from post_slop_vote where user_id = ?2 and post_id in (?1)", ids, me)
+        @Suppress("UNCHECKED_CAST")
+        val viewRows = (em.createNativeQuery("select id, views, ai_slop_at is not null from post where id in (?1)")
+            .setParameter(1, ids).resultList as List<Array<Any?>>)
+        val views = viewRows.associate { it[0] as UUID to (it[1] as Number).toLong() }
+        val slopped = viewRows.filter { it[2] == true }.map { it[0] as UUID }.toSet()
         val myLikes = mine("select post_id from post_like where user_id = ?2 and post_id in (?1)", ids, me)
 
         val commIds = posts.mapNotNull { it.communityId }.distinct()
@@ -574,6 +661,7 @@ class PostService(
                     p.id in myUp, p.id in myLikes,
                     // пульс открыт всем; запись сообщества — только участникам
                     canComment = p.isPulse || p.communityId == null || p.communityId in myMember,
+                    slopVoted = p.id in mySlop,
                 ),
                 pulse = p.isPulse,
                 pulsar = p.isPulse && c != null,
@@ -589,6 +677,9 @@ class PostService(
                 wallOwner = p.wallUserId?.let { authors[it] },
                 tags = postTags[p.id] ?: emptyList(),
                 sourceUrl = p.sourceUrl,
+                views = maxOf(views[p.id] ?: 0L, slopVotes[p.id] ?: 0L),
+                aiSlop = p.id in slopped,
+                slopVotes = slopVotes[p.id] ?: 0,
             )
         }
     }
@@ -725,11 +816,16 @@ class PostService(
 }
 
 @ApplicationScoped
-class PostReadCleanupJob(private val em: EntityManager) {
+class PostReadCleanupJob(private val em: EntityManager, private val lease: JobLease) {
     /** Прочтения старше суток больше ни на что не влияют (онлайн считается за 30 минут). */
     @Scheduled(every = "1h", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     @Transactional
     fun purge() {
+        if (!lease.acquire("post-read-purge", java.time.Duration.ofMinutes(50))) return
         em.createNativeQuery("delete from post_read where read_at < now() - interval '1 day'").executeUpdate()
+        // прочитанные уведомления старше 90 дней никому не нужны, а таблица растёт быстрее всех
+        em.createNativeQuery(
+            "delete from notification where read_at is not null and created_at < now() - interval '90 days'",
+        ).executeUpdate()
     }
 }

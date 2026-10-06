@@ -19,6 +19,9 @@ import org.example.rest.ForwardIn
 import org.example.rest.ForwardResultOut
 import org.example.rest.ForwardSentOut
 import org.example.rest.MessageReactionsOut
+import org.example.rest.MessageIdsIn
+import org.example.rest.DeleteManyOut
+import org.example.bus.PointerKinds
 import java.util.UUID
 
 /**
@@ -37,14 +40,13 @@ class ChatActionsService(
     private val media: MediaService,
 ) {
     companion object {
-        const val MAX_FORWARD = 50
+        const val MAX_FORWARD = 100
         const val MAX_TARGETS = 10
-        const val MAX_COPIES = 100
+        const val MAX_COPIES = 200
+        const val MAX_DELETE = 100
         const val MAX_MY_REACTIONS = 3
         const val MAX_EMOJIS = 20
         const val MAX_NAME = 100
-        /** Реакция — эмодзи (или несколько кодпоинтов одного эмодзи), а не слово. */
-        private val PLAIN_WORD = Regex("^[A-Za-z0-9_\\p{IsCyrillic}]+$")
     }
 
     // ================================================================ пересылка
@@ -107,13 +109,15 @@ class ChatActionsService(
                     extras = MessageExtras(
                         gifId = m.gifId,
                         stickerId = m.stickerId,
-                        forward = ForwardMeta(
+                        // hideAuthor — «без автора»: копия выглядит как моё сообщение
+                        forward = if (req.hideAuthor) null else ForwardMeta(
                             userId = m.fwdUserId ?: m.userId,
                             messageId = m.fwdMessageId ?: m.id,
                             chatId = m.fwdChatId ?: m.chatId,
                             at = m.fwdAt ?: m.createdAt,
                         ),
                         forwardTrackIds = tracks[m.id] ?: emptyList(),
+                        copied = req.hideAuthor,
                     ),
                 )
                 created += ack.id; lastSeq = ack.seq
@@ -123,6 +127,25 @@ class ChatActionsService(
         return ForwardResultOut(sent)
     }
 
+    /**
+     * Удалить выбранные сообщения разом (режим выбора). Удаляются только мои;
+     * чужие возвращаются в skipped. Каждому удалённому — message.updated, как при одиночном.
+     */
+    @Transactional
+    fun deleteMany(me: UUID, chatId: UUID, req: MessageIdsIn): DeleteManyOut {
+        requireMember(chatId, me)
+        val ids = req.messageIds.distinct()
+        if (ids.isEmpty() || ids.size > MAX_DELETE) throw ApiException.badRequest("invalid_messages", "messageIds: от 1 до $MAX_DELETE")
+        val mine = Message.list("id in ?1 and chatId = ?2 and userId = ?3 and deletedAt is null", ids, chatId, me)
+        val now = java.time.Instant.now()
+        mine.forEach { m ->
+            m.deletedAt = now
+            bus.publishPointerToChat(chatId, PointerKinds.MESSAGE_UPDATED, m.id.toString())
+        }
+        val deleted = mine.map { it.id }.toSet()
+        return DeleteManyOut(ids.filter { it in deleted }, ids.filter { it !in deleted })
+    }
+
     // ================================================================ реакции
 
     @Transactional
@@ -130,10 +153,9 @@ class ChatActionsService(
         requireMember(chatId, me)
         val m = Message.findById(messageId)
         if (m == null || m.chatId != chatId || m.deletedAt != null) throw ApiException.notFound("сообщение не найдено")
-        val emoji = rawEmoji.trim()
-        if (emoji.isEmpty() || emoji.length > 32 || emoji.any { it.isWhitespace() } || PLAIN_WORD.matches(emoji)) {
-            throw ApiException.badRequest("invalid_emoji", "реакция — эмодзи")
-        }
+        // любой один эмодзи: с цветом кожи, ZWJ-семьи, флаги, клавиши 1️⃣
+        val emoji = EmojiText.normalize(rawEmoji)
+            ?: throw ApiException.badRequest("invalid_emoji", "реакция — один эмодзи")
         if (add) {
             val mine = count("select count(*) from message_reaction where message_id = ?1 and user_id = ?2 and emoji <> ?3", messageId, me, emoji)
             if (mine >= MAX_MY_REACTIONS) throw ApiException.badRequest("too_many_reactions", "не больше $MAX_MY_REACTIONS реакций на сообщение")

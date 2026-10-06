@@ -178,7 +178,13 @@ data class CommunityMembersPageOut(val items: List<CommunityMemberOut>, val tota
 data class PostCommunityOut(val id: UUID, val slug: String, val name: String, val hue: Int, val avatar: String? = null)
 
 /** Что смотрящий уже сделал с записью. */
-data class MyPostOut(val upvoted: Boolean, val liked: Boolean, val canComment: Boolean)
+data class MyPostOut(
+    val upvoted: Boolean,
+    val liked: Boolean,
+    val canComment: Boolean,
+    /** Я нажал «ИИ слоп». */
+    val slopVoted: Boolean = false,
+)
 
 @JsonInclude(JsonInclude.Include.ALWAYS)
 data class PostOut(
@@ -229,6 +235,12 @@ data class PostOut(
     val tags: List<String> = emptyList(),
     /** Оригинал во внешнем источнике (записи зеркал Telegram: https://t.me/канал/123). */
     val sourceUrl: String? = null,
+    /** Сколько разных людей открывали запись. */
+    val views: Long = 0,
+    /** Позорная плашка «ИИ слоп» (≥20% просмотревших нажали кнопку). */
+    val aiSlop: Boolean = false,
+    /** Сколько нажали «ИИ слоп». */
+    val slopVotes: Long = 0,
 )
 
 /** kind: image / gif / video */
@@ -272,6 +284,22 @@ data class UpvoteBudgetOut(val upvotesLeft: Int, val perDay: Int, val resetsAt: 
 data class LikeOut(val likes: Long, val liked: Boolean)
 
 data class ReadOut(val readers: Long)
+
+/** Ответ на PUT/DELETE /api/posts/{id}/slop. */
+data class SlopOut(
+    /** Плашка уже висит. */
+    val aiSlop: Boolean,
+    val votes: Long,
+    val views: Long,
+    /** votes * 100 / views. */
+    val percent: Int,
+    /** Порог в процентах (20). */
+    val threshold: Int,
+    /** Минимум голосов, чтобы порог сработал (5). */
+    val minVotes: Int,
+    /** Я голосовал. */
+    val voted: Boolean,
+)
 
 /**
  * Переслать запись. Куда — любое сочетание (всего до 20 адресатов):

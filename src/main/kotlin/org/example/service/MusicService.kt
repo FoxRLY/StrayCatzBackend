@@ -46,6 +46,7 @@ class MusicService(
     private val friends: FriendService,
     private val communities: CommunityService,
     private val tagLinks: TagService,
+    private val badges: BadgeService,
 ) {
     companion object {
         const val MAX_TEXT = 200
@@ -379,9 +380,38 @@ class MusicService(
         )
         // прослушивание считаем, только если начали с начала — перемотка не накручивает
         if (pos < 5) exec("update track set plays = plays + 1 where id = ?1", t.id)
+        noteListen(me, t.id)
         val out = NowPlayingOut(me, true, render(listOf(t), me).first(), startedAt, endsAt, pos)
         pushToFriends(me, out.copy(track = out.track?.copy(inLibrary = false, mine = false)))
         return out
+    }
+
+    /**
+     * Для значков: какие разные треки человек слушал («Тысяча треков») и
+     * «Слушали вместе» — тот же трек прямо сейчас играет у друга.
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun noteListen(me: UUID, trackId: UUID) {
+        exec(
+            """
+            insert into track_listen (user_id, track_id) values (?1, ?2)
+            on conflict (user_id, track_id) do update set last_at = now(), plays = track_listen.plays + 1
+            """.trimIndent(),
+            me, trackId,
+        )
+        val fr = friends.friendIdsOf(me)
+        val together = if (fr.isEmpty()) emptyList() else em.createNativeQuery(
+            "select user_id from now_playing where track_id = ?1 and ends_at > now() and user_id in (?2)",
+            UUID::class.java,
+        ).setParameter(1, trackId).setParameter(2, fr).resultList as List<UUID>
+        if (together.isNotEmpty()) {
+            val both = together + me
+            exec("insert into user_stat (user_id) select id from users where id in (?1) on conflict do nothing", both)
+            exec("update user_stat set together_count = together_count + 1, updated_at = now() where user_id in (?1)", both)
+            badges.mark(both)
+        } else {
+            badges.mark(me)
+        }
     }
 
     /** Пауза/стоп — «ничего не играет». */

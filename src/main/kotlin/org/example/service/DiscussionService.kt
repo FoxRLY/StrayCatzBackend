@@ -23,6 +23,7 @@ import java.util.UUID
 class DiscussionService(
     private val em: EntityManager,
     private val communities: CommunityService,
+    private val bus: org.example.bus.EventBus,
 ) {
     companion object {
         const val ROOM_COMMUNITY = "community"
@@ -55,6 +56,7 @@ class DiscussionService(
         }
         chat.persist()
         ChatMember().also { it.id = ChatMemberId(chat.id, me) }.persist()
+        bus.membershipChanged(listOf(me))
         return toOut(listOf(chat), me).first()
     }
 
@@ -68,6 +70,7 @@ class DiscussionService(
             m == null -> ChatMember().also { it.id = ChatMemberId(chat.id, me) }.persist()
             m.isDeleted -> { m.isDeleted = false; m.deletedAt = null }
         }
+        bus.membershipChanged(listOf(me))
         return toOut(listOf(chat), me).first()
     }
 
@@ -75,6 +78,7 @@ class DiscussionService(
     fun leave(me: UUID, slug: String, chatId: UUID) {
         val (_, chat) = find(slug, chatId)
         ChatMember.findById(ChatMemberId(chat.id, me))?.let { it.isDeleted = true; it.deletedAt = Instant.now() }
+        bus.membershipChanged(listOf(me))
     }
 
     @Transactional
@@ -91,6 +95,8 @@ class DiscussionService(
         if (chat.createdBy != me) communities.requireRole(c, me, "admin")
         chat.isDeleted = true
         chat.deletedAt = Instant.now()
+        // все участники: их ноды отпишутся от чата
+        bus.membershipChanged(ChatMember.list("id.chatId = ?1 and isDeleted = false", chat.id).map { it.id.userId })
     }
 
     // ------------------------------------------------------------------

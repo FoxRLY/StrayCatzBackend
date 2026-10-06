@@ -51,6 +51,7 @@ class CommunityService(
     private val presence: PresenceService,
     private val tags: TagService,
     private val media: MediaService,
+    private val bus: org.example.bus.EventBus,
 ) {
     companion object {
         private val SLUG_RE = Regex("^[a-z0-9][a-z0-9-]{1,31}$")
@@ -625,6 +626,7 @@ class CommunityService(
               and chat_id in (select id from chat where community_id = ?2)
             """.trimIndent(),
         ).setParameter(1, userId).setParameter(2, communityId).executeUpdate()
+        bus.membershipChanged(listOf(userId))
     }
 
     private fun activeMember(communityId: UUID, userId: UUID): CommunityMember? =

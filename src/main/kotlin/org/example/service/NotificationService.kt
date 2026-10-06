@@ -21,6 +21,7 @@ import java.util.UUID
  */
 @ApplicationScoped
 class NotificationService(
+    private val em: jakarta.persistence.EntityManager,
     private val bus: EventBus,
     private val mapper: ObjectMapper,
     private val profiles: UserProfileService,
@@ -58,6 +59,48 @@ class NotificationService(
         val frame = Envelope(t = FrameTypes.NOTIFICATION_NEW, d = mapper.valueToTree(toOut(listOf(n)).first()))
         bus.publishToUsers(listOf(userId), frame) // после COMMIT
         return n
+    }
+
+    /**
+     * Одно и то же уведомление многим (эфир, событие сообщества): вставка одним
+     * insert … select на каждую тысячу получателей и по кадру notification.new
+     * каждому — пачкой после COMMIT. Вместо N отдельных notify() с N запросами.
+     */
+    @Suppress("UNCHECKED_CAST")
+    @Transactional
+    fun notifyMany(userIds: Collection<UUID>, kind: String, actorId: UUID?, payload: Map<String, Any?> = emptyMap()): Int {
+        val ids = userIds.distinct()
+        if (ids.isEmpty()) return 0
+        val json = mapper.writeValueAsString(payload)
+        val payloadNode = mapper.readTree(json)
+        val actor = actorId?.let { profiles.shorts(listOf(it))[it] }
+        var total = 0
+        ids.chunked(1000).forEach { chunk ->
+            val rows = em.createNativeQuery(
+                """
+                with ins as (
+                    insert into notification (id, user_id, kind, actor_id, payload)
+                    select gen_random_uuid(), u.id, ?2, cast(nullif(?3, '') as uuid), cast(?4 as jsonb)
+                    from users u where u.id in (?1) and not u.is_deleted
+                    returning id, user_id, created_at
+                ) select id, user_id, created_at from ins
+                """.trimIndent(),
+            ).setParameter(1, chunk).setParameter(2, kind).setParameter(3, actorId?.toString() ?: "").setParameter(4, json)
+                .resultList as List<Array<Any?>>
+            rows.forEach { r ->
+                val out = NotificationOut(r[0] as UUID, kind, actor, payloadNode, toInstant(r[2]), null)
+                bus.publishToUsers(listOf(r[1] as UUID), Envelope(t = FrameTypes.NOTIFICATION_NEW, d = mapper.valueToTree(out)))
+            }
+            total += rows.size
+        }
+        return total
+    }
+
+    private fun toInstant(v: Any?): Instant = when (v) {
+        is Instant -> v
+        is java.time.OffsetDateTime -> v.toInstant()
+        is java.sql.Timestamp -> v.toInstant()
+        else -> Instant.now()
     }
 
     /** Было ли такое уведомление от actor к user за последние [window] — для антиспама. */

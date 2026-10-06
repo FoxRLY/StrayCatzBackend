@@ -1,181 +1,324 @@
 package org.example.bus
 
-import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.quarkus.logging.Log
 import io.quarkus.runtime.ShutdownEvent
 import io.quarkus.runtime.StartupEvent
+import io.quarkus.scheduler.Scheduled
+import io.quarkus.websockets.next.CloseReason
 import io.quarkus.websockets.next.OpenConnections
-import io.vertx.mutiny.core.Vertx
-import io.vertx.mutiny.pgclient.pubsub.PgSubscriber
-import io.vertx.pgclient.PgConnectOptions
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.enterprise.event.Observes
-import jakarta.persistence.EntityManager
+import jakarta.transaction.Status
+import jakarta.transaction.Synchronization
+import jakarta.transaction.TransactionSynchronizationRegistry
 import jakarta.transaction.Transactional
 import org.eclipse.microprofile.config.inject.ConfigProperty
 import org.example.proto.Envelope
+import org.example.registry.ConnState
 import org.example.registry.ConnectionRegistry
-import java.util.*
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
+import org.example.service.ChatService
+import java.util.UUID
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
-private const val CHANNEL = "straycatz_bus"
-
 /**
- * Рассылка между нодами через Postgres LISTEN/NOTIFY.
+ * Шина событий между нодами: «доставить кадр всем участникам чата / этим
+ * людям / тем, у кого открыта комната», где бы они ни были подключены.
  *
- * Главное отличие от прошлой версии: NOTIFY шлётся через тот же JDBC
- * (Hibernate), что и запись данных, внутри той же транзакции. У Postgres
- * NOTIFY транзакционный — уходит слушателям только при COMMIT и
- * выбрасывается при ROLLBACK. Раньше NOTIFY уходил через отдельный
- * реактивный пул ДО коммита, и нода-получатель могла не найти только что
- * вставленное сообщение ("исчезло между записью и рассылкой").
+ * Как устроено (рассчитано на 100k+ одновременных соединений):
+ *  1. Кадр собирается ОДИН раз — у того, кто публикует, — и уходит в шину
+ *     готовым текстом. Ноды-получатели в БД не ходят вообще.
+ *  2. Каналы адресные: чат, человек, комната. Нода подписана только на каналы
+ *     тех, кто к ней подключён (индексы в [ConnectionRegistry]), поэтому
+ *     сообщение получают только ноды с адресатами. Транспорт — Redis pub/sub
+ *     ([RedisTransport]); для разработки — Postgres NOTIFY ([PgNotifyTransport]).
+ *  3. Публикация — после COMMIT (через TransactionSynchronizationRegistry):
+ *     откатилась транзакция — никто ничего не получил.
+ *  4. Приём — по [lanes] однопоточным очередям, канал всегда в одной и той же
+ *     очереди: порядок сообщений внутри чата сохраняется, разные чаты идут
+ *     параллельно.
+ *  5. Доставка в сокет — по id соединения, без перебора всех соединений.
+ *     Клиент, который не успевает читать (больше [MAX_PENDING] кадров в
+ *     очереди), отключается с кодом 4508 и переподключается.
  *
- * Если publish* вызван вне транзакции (typing), @Transactional(REQUIRED)
- * откроет короткую свою.
- *
- * По шине ходит либо маленький готовый кадр (frame), либо указатель
- * (pointer) на строку в БД — NOTIFY режет пейлоад на 8000 байт.
+ * Состав чатов у подключённых держится в памяти: грузится при подключении,
+ * обновляется событием [membershipChanged] и сверкой раз в 10 минут.
  */
 @ApplicationScoped
 class EventBus(
-    private val vertx: Vertx,
     private val mapper: ObjectMapper,
-    private val em: EntityManager,
-    private val openConnections: OpenConnections,
     private val registry: ConnectionRegistry,
     private val resolver: BusResolver,
-    @ConfigProperty(name = "quarkus.datasource.reactive.url") private val reactiveUrl: String,
-    @ConfigProperty(name = "quarkus.datasource.username") private val dbUser: String,
-    @ConfigProperty(name = "quarkus.datasource.password") private val dbPassword: String,
+    private val openConnections: OpenConnections,
+    private val redis: RedisTransport,
+    private val pg: PgNotifyTransport,
+    private val tsr: TransactionSynchronizationRegistry,
+    private val chats: ChatService,
+    @ConfigProperty(name = "straycatz.bus.transport", defaultValue = "redis") private val transportName: String,
+    @ConfigProperty(name = "straycatz.bus.prefix", defaultValue = "sc") private val prefix: String,
+    @ConfigProperty(name = "straycatz.bus.lanes", defaultValue = "8") private val laneCount: Int,
 ) {
-    private lateinit var subscriber: PgSubscriber
+    companion object {
+        /** Кадров в очереди одного сокета, после которых считаем клиента зависшим. */
+        const val MAX_PENDING = 1000
+        const val SLOW_CONSUMER = 4508
+        private const val BUFFER_KEY = "straycatz.bus.buffer"
+        private const val T_FRAME = 'F'
+        private const val T_POINTER = 'P'
+        private const val T_CONTROL = 'C'
+        private const val CTL_CHATS = "chats"
+    }
 
-    // Один поток: NOTIFY приходят в порядке коммитов, и так они же и
-    // обрабатываются — message.new в чате не перемешиваются по seq.
-    // Отправка в сокеты асинхронная, поэтому медленный клиент поток не держит.
-    private val worker: ExecutorService = Executors.newSingleThreadExecutor { r ->
-        Thread(r, "straycatz-bus").apply { isDaemon = true }
+    private val transport: BusTransport = if (transportName.equals("pg", ignoreCase = true)) pg else redis
+    private val subLock = Any()
+    private val lanes: Array<ThreadPoolExecutor> = Array(laneCount.coerceIn(1, 64)) { i ->
+        ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, LinkedBlockingQueue()) { r ->
+            Thread(r, "straycatz-bus-$i").apply { isDaemon = true }
+        }
     }
 
     fun onStart(@Observes ev: StartupEvent) {
-        val opts = PgConnectOptions.fromUri(reactiveUrl.removePrefix("vertx-reactive:"))
-            .setUser(dbUser)
-            .setPassword(dbPassword)
-
-        subscriber = PgSubscriber.subscriber(vertx, opts)
-        subscriber.reconnectPolicy { retries -> minOf(retries * 500L, 10_000L) }
-        subscriber.channel(CHANNEL).handler { payload -> worker.execute { onNotify(payload) } }
-        subscriber.connectAndAwait()
-        Log.info("EventBus: слушаем канал $CHANNEL")
+        transport.start(::onMessage, ::onResubscribed)
     }
+
+    /** Нода останавливается: закрытия сокетов — не «человек ушёл» (presence не трогаем). */
+    @Volatile
+    var shuttingDown = false
+        set
 
     fun onStop(@Observes ev: ShutdownEvent) {
-        if (::subscriber.isInitialized) subscriber.close()
-        worker.shutdown()
-        worker.awaitTermination(2, TimeUnit.SECONDS)
+        shuttingDown = true
+        // «сервер перезапускается»: клиенты переподключатся (с разбросом) к другим нодам
+        runCatching {
+            openConnections.listAll().forEach { c ->
+                c.close(CloseReason(1012, "restart")).subscribe().with({}, {})
+            }
+        }
+        transport.stop()
+        lanes.forEach { it.shutdown() }
+        lanes.forEach { it.awaitTermination(2, TimeUnit.SECONDS) }
     }
 
-    // ---------------------------------------------------------------- publish
+    // ================================================================ публикация
 
-    /** Всем активным участникам чата. liveOnly = только тем, у кого чат открыт (typing). */
+    /** Всем участникам чата. liveOnly — только тем, у кого чат открыт на экране (typing). */
     @Transactional
     fun publishToChat(chatId: UUID, frame: Envelope, liveOnly: Boolean = false) =
-        notify(BusMessage(scope = Scope.CHAT, chatId = chatId, liveOnly = liveOnly, frame = mapper.valueToTree(frame)))
+        enqueue(listOf(chatCh(chatId) to wire(T_FRAME, if (liveOnly) "l" else "", text(frame))))
 
     /** Всем, у кого сейчас открыта комната ownerId (room.open). */
     @Transactional
     fun publishToRoomViewers(ownerId: UUID, frame: Envelope) =
-        notify(BusMessage(scope = Scope.ROOM, roomOwnerId = ownerId, frame = mapper.valueToTree(frame)))
+        enqueue(listOf(roomCh(ownerId) to wire(T_FRAME, "", text(frame))))
 
     @Transactional
     fun publishToUsers(userIds: Collection<UUID>, frame: Envelope) {
         if (userIds.isEmpty()) return
-        notify(BusMessage(scope = Scope.USERS, userIds = userIds.toList(), frame = mapper.valueToTree(frame)))
+        val payload = wire(T_FRAME, "", text(frame))
+        enqueue(userIds.distinct().map { userCh(it) to payload })
     }
 
+    /**
+     * Сообщение чата по id строки: кадр собирается здесь, один раз (в той же
+     * транзакции, поэтому видит только что вставленное). Если кадр не влезает
+     * в транспорт (Postgres NOTIFY, 8 КБ) — уходит указатель, и получатель
+     * дочитает строку сам.
+     */
     @Transactional
-    fun publishPointerToChat(chatId: UUID, kind: String, id: String) =
-        notify(BusMessage(scope = Scope.CHAT, chatId = chatId, pointer = Pointer(kind, id)))
+    fun publishPointerToChat(chatId: UUID, kind: String, id: String) {
+        val payload = resolved(kind, id) ?: return
+        enqueue(listOf(chatCh(chatId) to payload))
+    }
 
     @Transactional
     fun publishPointerToUsers(userIds: Collection<UUID>, kind: String, id: String) {
         if (userIds.isEmpty()) return
-        notify(BusMessage(scope = Scope.USERS, userIds = userIds.toList(), pointer = Pointer(kind, id)))
+        val payload = resolved(kind, id) ?: return
+        enqueue(userIds.distinct().map { userCh(it) to payload })
     }
 
-    private fun notify(msg: BusMessage) {
-        val json = mapper.writeValueAsString(msg)
-        require(json.toByteArray(Charsets.UTF_8).size < 7900) {
-            "bus-сообщение слишком большое для NOTIFY (${json.length} симв.) — используйте pointer"
+    /**
+     * Состав чатов этих людей поменялся (вошли/вышли/удалили чат): их ноды
+     * перечитают членство и переподпишутся. Звать после любых правок chat_member.
+     */
+    @Transactional
+    fun membershipChanged(userIds: Collection<UUID>) {
+        if (userIds.isEmpty()) return
+        val payload = wire(T_CONTROL, "", CTL_CHATS)
+        enqueue(userIds.distinct().map { userCh(it) to payload })
+    }
+
+    // ================================================================ подключения этой ноды
+
+    /** Новое соединение: подписаться на человека и его чаты. */
+    fun attach(st: ConnState) {
+        val memberOf = chats.memberChatIds(st.userId)
+        synchronized(subLock) {
+            apply(registry.put(st))
+            apply(registry.setChats(st.connectionId, memberOf))
         }
-        // pg_notify возвращает void, Hibernate такой тип не мапит — оборачиваем.
-        em.createNativeQuery("select 1 from (select pg_notify(?1, ?2)) as n")
-            .setParameter(1, CHANNEL)
-            .setParameter(2, json)
-            .singleResult
     }
 
-    // ---------------------------------------------------------------- receive
+    /** Соединение закрылось. @return сколько соединений человека осталось на этой ноде. */
+    fun detach(connectionId: String): Int = synchronized(subLock) {
+        val (left, delta) = registry.remove(connectionId)
+        apply(delta)
+        left
+    }
 
-    private fun onNotify(payload: String) {
+    /** Человек только что стал участником (проверили по БД) — не ждать события. */
+    fun addChat(connectionId: String, chatId: UUID) = synchronized(subLock) { apply(registry.addChat(connectionId, chatId)) }
+
+    fun removeChat(connectionId: String, chatId: UUID) = synchronized(subLock) { apply(registry.removeChat(connectionId, chatId)) }
+
+    fun openRoom(connectionId: String, ownerId: UUID) = synchronized(subLock) { apply(registry.openRoom(connectionId, ownerId)) }
+
+    fun closeRoom(connectionId: String, ownerId: UUID) = synchronized(subLock) { apply(registry.closeRoom(connectionId, ownerId)) }
+
+    /** Перечитать состав чатов у всех подключённых к этой ноде (сверка раз в 10 минут). */
+    fun reconcile() {
+        registry.localUsers().chunked(1000).forEach { refreshChats(it) }
+        val backlog = lanes.sumOf { it.queue.size }
+        Log.infof("шина: %d соединений, %d людей, очередь %d", registry.size(), registry.localUsers().size, backlog)
+    }
+
+    // ================================================================ приём
+
+    private fun onMessage(channel: String, payload: String) {
+        lanes[Math.floorMod(channel.hashCode(), lanes.size)].execute { process(channel, payload) }
+    }
+
+    private fun process(channel: String, payload: String) {
         try {
-            val msg = mapper.readValue(payload, BusMessage::class.java)
-            // JsonNode-поле Jackson читает из "frame":null как NullNode, а не
-            // как Kotlin-null — поэтому явно отбрасываем isNull, иначе в сокет
-            // улетает строка "null", а указатель так и не разрешается.
-            val frame: JsonNode = msg.frame?.takeUnless { it.isNull }
-                ?: msg.pointer?.let { resolver.resolve(it) }
-                ?: return
-            deliverLocally(msg, mapper.writeValueAsString(frame))
+            val nl = payload.indexOf('\n')
+            if (nl < 1) return
+            val type = payload[0]
+            val flags = payload.substring(2, nl)
+            val body = payload.substring(nl + 1)
+            val key = channel.substring(prefix.length + 1) // "c:<uuid>" / "u:<uuid>" / "r:<uuid>"
+            val scope = key[0]
+            val id = UUID.fromString(key.substring(2))
+            when (type) {
+                T_CONTROL -> if (scope == 'u' && body == CTL_CHATS) refreshChats(listOf(id))
+                T_FRAME -> deliver(targets(scope, id, flags), body)
+                T_POINTER -> {
+                    val targets = targets(scope, id, flags)
+                    if (targets.isEmpty()) return
+                    val frame = resolver.resolve(Pointer(body.substringBefore('|'), body.substringAfter('|'))) ?: return
+                    deliver(targets, mapper.writeValueAsString(frame))
+                }
+            }
         } catch (e: Exception) {
-            Log.error("EventBus: не смогли обработать NOTIFY", e)
+            Log.error("шина: не смогли обработать сообщение канала $channel", e)
         }
     }
 
-    private fun deliverLocally(msg: BusMessage, text: String) {
-        val userIds = msg.userIds
-        val chatId = msg.chatId
-        val roomOwnerId = msg.roomOwnerId
-        val targetConnIds: Set<String> = when {
-            roomOwnerId != null ->
-                registry.all().filter { roomOwnerId in it.openRooms }.mapTo(HashSet()) { it.connectionId }
-
-            userIds != null ->
-                userIds.flatMapTo(HashSet()) { registry.connectionIdsOf(it) }
-
-            chatId != null && msg.liveOnly -> {
-                val open = registry.all().filter { chatId in it.openChats }
-                if (open.isEmpty()) return
-                // вышедшие из чата не должны получать typing, даже если вкладка открыта
-                val members = resolver.activeMemberIds(chatId).toSet()
-                open.filter { it.userId in members }.mapTo(HashSet()) { it.connectionId }
-            }
-
-            chatId != null -> {
-                // Участников берём из БД, а не из кэша на соединении: так и
-                // свежедобавленные в чат получат сообщение, и удалённые
-                // сразу перестанут.
-                val localUsers = registry.all().mapTo(HashSet()) { it.userId }
-                if (localUsers.isEmpty()) return
-                resolver.activeMemberIds(chatId)
-                    .filter { it in localUsers }
-                    .flatMapTo(HashSet()) { registry.connectionIdsOf(it) }
-            }
-
-            else -> emptySet()
+    private fun targets(scope: Char, id: UUID, flags: String): Set<String> = when (scope) {
+        'c' -> {
+            val all = registry.chatConnections(id)
+            if ('l' in flags) all.filterTo(HashSet()) { registry.get(it)?.openChats?.contains(id) == true } else all
         }
-        if (targetConnIds.isEmpty()) return
+        'u' -> registry.connectionIdsOf(id)
+        'r' -> registry.roomConnections(id)
+        else -> emptySet()
+    }
 
-        for (conn in openConnections.listAll()) {
-            if (conn.id() !in targetConnIds) continue
+    private fun deliver(connectionIds: Set<String>, text: String) {
+        for (cid in connectionIds) {
+            val st = registry.get(cid) ?: continue
+            val conn = openConnections.findByConnectionId(cid).orElse(null) ?: continue
+            if (st.pending.get() >= MAX_PENDING) {
+                Log.infof("шина: %s не успевает читать — отключаем", cid)
+                conn.close(CloseReason(SLOW_CONSUMER, "slow consumer")).subscribe().with({}, {})
+                continue
+            }
+            st.pending.incrementAndGet()
             conn.sendText(text).subscribe().with(
-                {},
-                { e -> Log.debugf("EventBus: не смогли отправить в %s: %s", conn.id(), e.message) },
+                { st.pending.decrementAndGet() },
+                { e -> st.pending.decrementAndGet(); Log.debugf("шина: не смогли отправить в %s: %s", cid, e.message) },
             )
         }
     }
+
+    /** Транспорт переподключился — за время обрыва что-то могло потеряться: клиенты пусть догонят. */
+    private fun onResubscribed() {
+        val text = mapper.writeValueAsString(Envelope(t = "resync", d = mapper.createObjectNode()))
+        lanes[0].execute { deliver(registry.all().mapTo(HashSet()) { it.connectionId }, text) }
+    }
+
+    fun refreshChats(userIds: Collection<UUID>) {
+        val local = userIds.filter { registry.connectionCount(it) > 0 }
+        if (local.isEmpty()) return
+        val byUser = chats.memberChatIdsOf(local)
+        synchronized(subLock) {
+            local.forEach { u ->
+                val set = byUser[u] ?: emptySet()
+                registry.connectionIdsOf(u).forEach { cid -> apply(registry.setChats(cid, set)) }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+
+    /** Вызывать под subLock: порядок SUBSCRIBE/UNSUBSCRIBE должен совпадать с порядком изменений. */
+    private fun apply(d: ConnectionRegistry.Delta) {
+        if (d.isEmpty()) return
+        val sub = d.users.map(::userCh) + d.chats.map(::chatCh) + d.rooms.map(::roomCh)
+        val unsub = d.usersGone.map(::userCh) + d.chatsGone.map(::chatCh) + d.roomsGone.map(::roomCh)
+        if (unsub.isNotEmpty()) transport.unsubscribe(unsub)
+        if (sub.isNotEmpty()) transport.subscribe(sub)
+    }
+
+    private fun enqueue(messages: List<Pair<String, String>>) {
+        if (messages.isEmpty()) return
+        if (transport.transactional) {
+            transport.publish(messages)
+            return
+        }
+        when (tsr.transactionStatus) {
+            Status.STATUS_NO_TRANSACTION -> transport.publish(messages)
+            Status.STATUS_ACTIVE -> buffer().addAll(messages)
+            else -> Unit // транзакция уже откатывается — никому ничего
+        }
+    }
+
+    /** Сообщения этой транзакции — уйдут одной пачкой после COMMIT. */
+    @Suppress("UNCHECKED_CAST")
+    private fun buffer(): MutableList<Pair<String, String>> {
+        (tsr.getResource(BUFFER_KEY) as MutableList<Pair<String, String>>?)?.let { return it }
+        val buf = ArrayList<Pair<String, String>>()
+        tsr.putResource(BUFFER_KEY, buf)
+        tsr.registerInterposedSynchronization(object : Synchronization {
+            override fun beforeCompletion() {}
+            override fun afterCompletion(status: Int) {
+                if (status == Status.STATUS_COMMITTED) transport.publish(buf)
+            }
+        })
+        return buf
+    }
+
+    private fun resolved(kind: String, id: String): String? {
+        val frame = resolver.resolve(Pointer(kind, id)) ?: return null
+        val payload = wire(T_FRAME, "", mapper.writeValueAsString(frame))
+        if (payload.toByteArray(Charsets.UTF_8).size <= transport.maxPayload) return payload
+        return wire(T_POINTER, "", "$kind|$id")
+    }
+
+    private fun text(frame: Envelope): String = mapper.writeValueAsString(frame)
+
+    /** «<тип>|<флаги>\n<тело>»: заголовок разбирается без JSON, тело уходит в сокет как есть. */
+    private fun wire(type: Char, flags: String, body: String): String = "$type|$flags\n$body"
+
+    private fun chatCh(id: UUID) = "$prefix:c:$id"
+    private fun userCh(id: UUID) = "$prefix:u:$id"
+    private fun roomCh(id: UUID) = "$prefix:r:$id"
 }
 
+/** Сверка состава чатов раз в 10 минут — на случай пропущенного события. */
+@ApplicationScoped
+class BusReconcileJob(private val bus: EventBus) {
+    @Scheduled(every = "10m", delayed = "5m", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
+    fun run() = bus.reconcile()
+}

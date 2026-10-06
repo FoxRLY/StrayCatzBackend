@@ -203,10 +203,14 @@ class CallService(
 }
 
 @ApplicationScoped
-class CallJobs(private val calls: CallService) {
+class CallJobs(private val calls: CallService, private val lease: JobLease) {
     @Scheduled(every = "10s", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
-    fun expire() = calls.expireRinging()
+    fun expire() {
+        if (lease.acquire("call-expire", java.time.Duration.ofSeconds(30))) calls.expireRinging()
+    }
 
     @Scheduled(every = "5m", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
-    fun purge() = calls.purgeOldSignals()
+    fun purge() {
+        if (lease.acquire("call-purge", java.time.Duration.ofMinutes(4))) calls.purgeOldSignals()
+    }
 }

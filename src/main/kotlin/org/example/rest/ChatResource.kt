@@ -34,8 +34,11 @@ class ChatResource(
 
     /** Мои чаты: последнее сообщение, непрочитанные, собеседник в личке. */
     @GET
-    fun list(@HeaderParam("Authorization") authorization: String?): List<ChatListItemOut> =
-        chats.listMine(currentUser.require(authorization).userId)
+    fun list(
+        @HeaderParam("Authorization") authorization: String?,
+        /** Только чаты этой папки (GET /api/chats/folders). */
+        @QueryParam("folder") folder: UUID?,
+    ): List<ChatListItemOut> = chats.listMine(currentUser.require(authorization).userId, folder)
 
     /** {"type":"direct","userId"} | {"type":"group","name","memberIds"} -> 201 (или 200, если личка уже была). */
     @POST
@@ -127,6 +130,12 @@ class ChatResource(
     @Path("/{id}/messages/forward")
     fun forward(@HeaderParam("Authorization") authorization: String?, @PathParam("id") id: UUID, req: ForwardIn?): ForwardResultOut =
         actions.forward(currentUser.require(authorization).userId, id, req ?: ForwardIn())
+
+    /** Удалить выбранные (только свои). */
+    @POST
+    @Path("/{id}/messages/delete")
+    fun deleteMany(@HeaderParam("Authorization") authorization: String?, @PathParam("id") id: UUID, req: MessageIdsIn?): DeleteManyOut =
+        actions.deleteMany(currentUser.require(authorization).userId, id, req ?: MessageIdsIn())
 
     /** Поставить реакцию (эмодзи в пути, url-encoded). То же по сокету: reaction.add. */
     @PUT

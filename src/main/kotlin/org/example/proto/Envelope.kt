@@ -32,6 +32,10 @@ object FrameTypes {
     const val PRESENCE_SET = "presence.set"
     const val PRESENCE_QUERY = "presence.query"
     const val PING = "ping"
+    /** «Я здесь»: мышь/клавиатура/скролл, не чаще раза в минуту. Без ответа. */
+    const val ACTIVITY = "activity"
+    /** Переслать выбранные сообщения (как POST …/messages/forward). */
+    const val MESSAGE_FORWARD = "message.forward"
     /** Смотрю комнату — присылай room.updated, пока открыта. d = {ownerId} */
     const val ROOM_OPEN = "room.open"
     const val ROOM_CLOSE = "room.close"
@@ -73,6 +77,10 @@ object FrameTypes {
     const val FEED_BUMP = "feed.bump"
     const val ERROR = "error"
     const val PONG = "pong"
+    /** Ответ на message.forward (тот же rid): ForwardResultOut. */
+    const val MESSAGE_FORWARDED = "message.forwarded"
+    /** Мои папки чатов поменялись (на другом устройстве): перечитать GET /api/chats/folders. */
+    const val CHAT_FOLDERS = "chat.folders"
 
     // звонки — от сервера
     const val CALL_RINGING = "call.ringing"

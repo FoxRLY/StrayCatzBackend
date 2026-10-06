@@ -26,6 +26,23 @@ class ChatService {
     fun memberChatIds(userId: UUID): Set<UUID> =
         activeMembershipsOf(userId).map { it.id.chatId }.toSet()
 
+    /** Чаты сразу многих людей (шина: переподписка нод). userId → его чаты. */
+    @Transactional
+    fun memberChatIdsOf(userIds: Collection<UUID>): Map<UUID, Set<UUID>> {
+        if (userIds.isEmpty()) return emptyMap()
+        return userIds.distinct().chunked(1000)
+            .flatMap { ChatMember.list("id.userId in ?1 and $activeMembership", it) }
+            .groupBy({ it.id.userId }) { it.id.chatId }
+            .mapValues { it.value.toSet() }
+    }
+
+    /** Тип чата не меняется — держим в памяти (typing и прочитанное в больших чатах не рассылаем). */
+    private val roomTypes = java.util.concurrent.ConcurrentHashMap<UUID, String>()
+
+    @Transactional
+    fun roomType(chatId: UUID): String? = roomTypes[chatId]
+        ?: org.example.domain.Chat.findById(chatId)?.roomType?.also { if (roomTypes.size < 200_000) roomTypes[chatId] = it }
+
     @Transactional
     fun activeMemberIds(chatId: UUID): List<UUID> =
         ChatMember.list("id.chatId = ?1 and isDeleted = false", chatId).map { it.id.userId }
