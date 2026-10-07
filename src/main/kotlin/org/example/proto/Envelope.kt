@@ -39,6 +39,9 @@ object FrameTypes {
     /** Смотрю комнату — присылай room.updated, пока открыта. d = {ownerId} */
     const val ROOM_OPEN = "room.open"
     const val ROOM_CLOSE = "room.close"
+    /** Открыл/закрыл страницу сообщества: { communityId } — сюда летит voice.updated / voice.removed. */
+    const val COMMUNITY_OPEN = "community.open"
+    const val COMMUNITY_CLOSE = "community.close"
     /** Поставить / снять реакцию. d = {chatId, messageId, emoji} */
     const val REACTION_ADD = "reaction.add"
     const val REACTION_REMOVE = "reaction.remove"
@@ -88,6 +91,10 @@ object FrameTypes {
     const val CALL_DECLINED = "call.declined"
     const val CALL_LEFT = "call.left"
     const val CALL_ENDED = "call.ended"
+    /** Ответ на call.invite / call.accept этому соединению: { call, livekit: { url, token, room, identity } }. */
+    const val CALL_JOINED = "call.joined"
+    /** Состояние звонка поменялось (кто в звонке, кто подключён): CallOut. */
+    const val CALL_UPDATED = "call.updated"
 }
 
 /** Коды закрытия сокета. */

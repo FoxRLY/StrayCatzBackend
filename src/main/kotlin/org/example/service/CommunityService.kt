@@ -82,8 +82,9 @@ class CommunityService(
             "rooms" to "Комнаты",
             "music" to "Музыка",
             "replays" to "Реплеи",
+            "voice" to "Голос",
         )
-        val DEFAULT_SECTIONS = listOf("posts", "discussions", "events", "members")
+        val DEFAULT_SECTIONS = listOf("posts", "discussions", "events", "members", "voice")
 
         /** У проекта только записи, обсуждения и события. */
         val PROJECT_SECTIONS = listOf("posts", "discussions", "events")

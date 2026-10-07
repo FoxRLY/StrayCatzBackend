@@ -55,6 +55,22 @@ services:
     volumes:
       - miniodata:/data
   # Стримы: принимает RTMP от OBS и раздаёт зрителям HLS/WebRTC без перекодирования.
+  # Звонки (личные и групповые): LiveKit SFU. Токены выдаёт бэкенд, о входе/выходе
+  # LiveKit сообщает вебхуками на /api/hooks/livekit. Конфиг — livekit/livekit.yaml.
+  livekit:
+    image: livekit/livekit-server:latest   # в проде закрепи версию (v1.x)
+    command: [ "--config", "/etc/livekit.yaml" ]
+    volumes:
+      - ./livekit/livekit.yaml:/etc/livekit.yaml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "7880:7880"            # сигналинг + API
+      - "7881:7881"            # ICE/TCP
+      - "7882:7882/udp"        # медиа
+    depends_on:
+      - redis
+
   # Кого пускать — спрашивает у бэкенда (auth-хук), см. mediamtx/mediamtx.yml.
   mediamtx:
     image: bluenviron/mediamtx:1.9.3

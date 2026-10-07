@@ -23,5 +23,11 @@ class CallParticipant : PanacheEntityBase {
     @Column(name = "left_at")
     var leftAt: Instant? = null
 
+    /** Сейчас в комнате LiveKit (вебхуки / сверка). */
+    var connected: Boolean = false
+
+    @Column(name = "connected_at")
+    var connectedAt: Instant? = null
+
     companion object : PanacheCompanionBase<CallParticipant, CallParticipantId>
 }

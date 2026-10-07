@@ -56,6 +56,7 @@ class ChatSocket(
         /** Служебные кадры — не считаются действием человека (не сбрасывают «отошёл»). */
         val PASSIVE_FRAMES = setOf(
             FrameTypes.PING, FrameTypes.PRESENCE_QUERY, FrameTypes.CHAT_CLOSE, FrameTypes.ROOM_CLOSE, FrameTypes.HELLO,
+            FrameTypes.COMMUNITY_CLOSE,
             // приходит сам, пока чат открыт на экране
             FrameTypes.MESSAGE_READ,
         )
@@ -91,8 +92,8 @@ class ChatSocket(
         // нода останавливается — человек сейчас переподключится к другой; offline на 20k человек
         // разом здесь не пишем (если не вернётся — строку погасит проверка пульса через 3 минуты)
         if (left == 0 && !bus.shuttingDown) {
-            // последняя вкладка на этой ноде — гасим presence и звонки
-            runCatching { calls.leaveAll(st.userId) }.onFailure { Log.error("leaveAll", it) }
+            // последняя вкладка на этой ноде — гасим presence. Звонки не трогаем: медиа идёт
+            // через LiveKit, и кто в звонке, решают его вебхуки и сверка (сокет мог просто моргнуть)
             runCatching { presence.disconnected(st.userId) }.onFailure { Log.error("presence offline", it) }
         }
     }
@@ -130,6 +131,9 @@ class ChatSocket(
                 FrameTypes.PRESENCE_QUERY -> handlePresenceQuery(st, env)
                 FrameTypes.ROOM_OPEN -> bus.openRoom(st.connectionId, codec.payloadAs(env, RoomOpenIn::class.java).ownerId)
                 FrameTypes.ROOM_CLOSE -> bus.closeRoom(st.connectionId, codec.payloadAs(env, RoomOpenIn::class.java).ownerId)
+                // подписка на голосовые каналы сообщества — тот же механизм, что у комнат (ключ — id сообщества)
+                FrameTypes.COMMUNITY_OPEN -> bus.openRoom(st.connectionId, codec.payloadAs(env, CommunityOpenIn::class.java).communityId)
+                FrameTypes.COMMUNITY_CLOSE -> bus.closeRoom(st.connectionId, codec.payloadAs(env, CommunityOpenIn::class.java).communityId)
                 FrameTypes.PING -> send(FrameTypes.PONG, null, env.rid)
                 FrameTypes.REACTION_ADD, FrameTypes.REACTION_REMOVE -> handleReaction(st, env)
 
@@ -277,13 +281,14 @@ class ChatSocket(
     private fun handleCallInvite(st: ConnState, env: Envelope) {
         val d = codec.payloadAs(env, CallInviteIn::class.java)
         if (!requireMember(st, d.chatId, env.rid)) return
-        calls.invite(d.chatId, d.callId, d.kind, st.userId)
+        // в ответ — токен LiveKit этому соединению (тот же ответ, что у POST /api/chats/{id}/call)
+        send(FrameTypes.CALL_JOINED, calls.invite(d.chatId, d.callId, d.kind, st.userId), env.rid)
     }
 
     private fun handleCallAccept(st: ConnState, env: Envelope) {
         val d = codec.payloadAs(env, CallAcceptIn::class.java)
         if (!requireMember(st, d.chatId, env.rid)) return
-        calls.accept(d.chatId, d.callId, st.userId)
+        send(FrameTypes.CALL_JOINED, calls.accept(d.chatId, d.callId, st.userId), env.rid)
     }
 
     private fun handleCallDecline(st: ConnState, env: Envelope) {

@@ -1,0 +1,29 @@
+# LiveKit для разработки (docker compose). Прод — см. livekit.prod.yaml рядом.
+port: 7880                 # сигналинг (WebSocket) + серверный API (Twirp)
+logging:
+  level: info
+
+rtc:
+  tcp_port: 7881           # ICE/TCP — если UDP режется
+  udp_port: 7882           # один UDP-порт на всё медиа (мультиплексирование) — удобно в docker
+  use_external_ip: false
+  node_ip: 127.0.0.1       # браузер на этой же машине ходит в проброшенный 7882/udp
+
+# через Redis ноды LiveKit узнают друг о друге и о том, где какая комната (тот же Redis, что у шины)
+redis:
+  address: redis:6379
+
+keys:
+  # ключ: секрет (секрет — не короче 32 символов). Тот же в straycatz.livekit.api-key/api-secret.
+  devkey: devsecret-straycatz-change-me-32chars-min
+
+webhook:
+  api_key: devkey
+  urls:
+    # бэкенд запущен на хосте (quarkus dev)
+    - http://host.docker.internal:8080/api/hooks/livekit
+
+room:
+  empty_timeout: 60        # пустая комната живёт минуту
+  departure_timeout: 20    # после ухода последнего — 20 с на переподключение
+  max_participants: 100

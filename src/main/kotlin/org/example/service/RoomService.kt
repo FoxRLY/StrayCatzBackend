@@ -59,6 +59,7 @@ class RoomService(
     private val notifications: NotificationService,
     private val attachments: AttachmentService,
     private val badges: BadgeService,
+    private val calls: CallService,
 ) {
     companion object {
         val THEMES = setOf("dvor", "fonar", "led", "malina")
@@ -127,6 +128,7 @@ class RoomService(
             friends = if (shown("friends")) friendsPage(viewer, owner.id, PREVIEW_FRIENDS, 0) else null,
             communities = if (shown("communities")) communities.ofUser(owner.id, PREVIEW_COMMUNITIES).items else null,
             guestbook = if (shown("guestbook")) guestbookPage(viewer, owner.id, null, PREVIEW_GUESTBOOK) else null,
+            canCall = !isOwner && calls.canCall(viewer, owner.id),
         )
     }
 

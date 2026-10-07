@@ -34,5 +34,12 @@ class CallEntity : PanacheEntityBase {
     @Column(name = "end_reason")
     var endReason: String? = null
 
+    /** Комната LiveKit: call-<id>. */
+    @Column(name = "room_name")
+    var roomName: String? = null
+
+    /** true — участникам звонили; false — «открытый» звонок большой группы. */
+    var ring: Boolean = true
+
     companion object : PanacheCompanionBase<CallEntity, UUID>
 }

@@ -30,6 +30,7 @@ class ChatResource(
     private val chats: ChatManagementService,
     private val actions: ChatActionsService,
     private val media: MediaService,
+    private val calls: org.example.service.CallService,
 ) {
 
     /** Мои чаты: последнее сообщение, непрочитанные, собеседник в личке. */
@@ -130,6 +131,22 @@ class ChatResource(
     @Path("/{id}/messages/forward")
     fun forward(@HeaderParam("Authorization") authorization: String?, @PathParam("id") id: UUID, req: ForwardIn?): ForwardResultOut =
         actions.forward(currentUser.require(authorization).userId, id, req ?: ForwardIn())
+
+    /**
+     * Начать звонок в беседе ({kind: audio|video}) или войти в уже идущий.
+     * → { call, livekit: { url, token, room, identity } } — дальше `room.connect(url, token)`.
+     */
+    @POST
+    @Path("/{id}/call")
+    fun startCall(@HeaderParam("Authorization") authorization: String?, @PathParam("id") id: UUID, req: CallStartIn?): CallJoinOut =
+        calls.start(currentUser.require(authorization).userId, id, req?.kind)
+
+    /** Идущий звонок беседы (для плашки «идёт звонок») или 204. */
+    @GET
+    @Path("/{id}/call")
+    fun activeCall(@HeaderParam("Authorization") authorization: String?, @PathParam("id") id: UUID): Response =
+        calls.activeInChat(currentUser.require(authorization).userId, id)
+            ?.let { Response.ok(it).build() } ?: Response.noContent().build()
 
     /** Удалить выбранные (только свои). */
     @POST

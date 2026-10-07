@@ -1,0 +1,52 @@
+# LiveKit в проде: N одинаковых нод с этим конфигом + общий Redis.
+#
+# Как масштабируется:
+#  - каждая нода регистрируется в Redis; новая комната создаётся на наименее загруженной
+#    (node_selector), все участники комнаты подключаются к ЕЁ ноде (сигналинг клиента
+#    приходит на любую ноду через балансировщик и перенаправляется сам);
+#  - добавить мощности = поднять ещё ноду с этим же конфигом; убрать — сначала drain
+#    (SIGTERM: нода перестаёт брать новые комнаты и ждёт, пока текущие закончатся);
+#  - медиа идёт напрямую браузер ⇄ нода по её публичному IP (use_external_ip),
+#    поэтому ноды — на хостовой сети, не за NAT балансировщика.
+#
+# Секреты — из переменных окружения: LIVEKIT_KEYS="ключ: секрет", LIVEKIT_REDIS_PASSWORD…
+port: 7880
+logging:
+  level: info
+
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000          # UDP-диапазон под медиа (откройте в файрволе)
+  port_range_end: 60000
+  use_external_ip: true            # узнать публичный IP через STUN и объявлять его клиентам
+
+redis:
+  address: redis.internal:6379     # Redis (лучше отдельный от шины бэкенда, с репликой / Sentinel)
+  # sentinel_master_name: livekit
+  # sentinel_addresses: [ "s1:26379", "s2:26379", "s3:26379" ]
+
+turn:
+  # встроенный TURN — для сетей, где UDP закрыт (офисы, мобильные операторы)
+  enabled: true
+  domain: turn.straycatz.example
+  tls_port: 5349                   # или 443 на отдельном IP — проходит почти любой файрвол
+  udp_port: 3478
+  external_tls: true               # TLS снимает балансировщик L4
+
+webhook:
+  api_key: straycatz
+  urls:
+    - https://api.straycatz.example/api/hooks/livekit
+
+room:
+  empty_timeout: 60
+  departure_timeout: 20
+  max_participants: 100
+
+# комнату — на ноду с наименьшей загрузкой CPU; с регионами — region-aware
+node_selector:
+  kind: cpuload
+  sort_by: cpuload
+  # kind: regionaware
+  # region: eu-central
+  # regions: [ { name: eu-central, lat: 50.11, lon: 8.68 }, { name: ru-msk, lat: 55.75, lon: 37.62 } ]

@@ -134,7 +134,8 @@ data class ErrorOut(val rid: String? = null, val code: String, val message: Stri
 
 // ---- звонки ----
 
-data class CallRingingOut(val chatId: UUID, val callId: UUID, val fromUserId: UUID, val kind: String)
+/** ring = false — «открытый» звонок большой группы: не звонить, а показать плашку «идёт звонок». */
+data class CallRingingOut(val chatId: UUID, val callId: UUID, val fromUserId: UUID, val kind: String, val ring: Boolean = true)
 data class CallAcceptedOut(val chatId: UUID, val callId: UUID, val userId: UUID)
 data class CallDeclinedOut(val chatId: UUID, val callId: UUID, val userId: UUID, val reason: String?)
 data class CallLeftOut(val chatId: UUID, val callId: UUID, val userId: UUID)

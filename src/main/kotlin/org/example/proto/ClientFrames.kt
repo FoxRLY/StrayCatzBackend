@@ -55,6 +55,9 @@ data class RoomOpenIn(val ownerId: UUID)
 
 data class TypingIn(val chatId: UUID)
 
+/** community.open / community.close */
+data class CommunityOpenIn(val communityId: UUID)
+
 data class PresenceSetIn(
     val status: String? = null,      // online / away / dnd / invisible
     val doing: String? = null,

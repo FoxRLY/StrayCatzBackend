@@ -119,6 +119,8 @@ data class RoomOut(
     /** Контракт фронта: голый массив (первые 12), null — блок скрыт. */
     val communities: List<CommunityShortOut>?,
     val guestbook: GuestbookPageOut?,
+    /** Показать кнопку «позвонить»: друзья или уже есть личка (POST /api/calls/to-username/{username}). */
+    val canCall: Boolean = false,
 )
 
 /** PATCH /api/rooms/me — null/нет поля: не трогаем; "" в текстовых: очистить. */
