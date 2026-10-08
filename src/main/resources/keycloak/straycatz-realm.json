@@ -11,6 +11,24 @@
   "accessTokenLifespan": 900,
   "ssoSessionIdleTimeout": 2592000,
   "ssoSessionMaxLifespan": 2592000,
+  "roles": {
+    "realm": [
+      {
+        "name": "moderator",
+        "description": "Модератор straycatz: панель /api/mod — тикеты, блокировки, ограничения"
+      },
+      {
+        "name": "dictator",
+        "description": "Верховный диктатор straycatz: всё, что модератор, + указы в профили и назначение модераторов",
+        "composite": true,
+        "composites": {
+          "realm": [
+            "moderator"
+          ]
+        }
+      }
+    ]
+  },
   "clients": [
     {
       "clientId": "straycatz-web",
@@ -64,6 +82,9 @@
           "value": "alice",
           "temporary": false
         }
+      ],
+      "realmRoles": [
+        "dictator"
       ]
     },
     {
@@ -96,6 +117,9 @@
           "value": "carol",
           "temporary": false
         }
+      ],
+      "realmRoles": [
+        "moderator"
       ]
     },
     {
@@ -106,7 +130,8 @@
         "realm-management": [
           "manage-users",
           "view-users",
-          "query-users"
+          "query-users",
+          "view-realm"
         ]
       }
     }

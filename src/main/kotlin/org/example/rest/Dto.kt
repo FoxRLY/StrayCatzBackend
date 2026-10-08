@@ -54,6 +54,12 @@ data class AccountOut(
     /** Настроение и название своей комнаты — чтобы шапка и профиль не ходили в /api/rooms. */
     val mood: String? = null,
     val roomTitle: String? = null,
+    /** Указ верховного диктатора — плашка в профиле (снять нельзя). */
+    val decree: DecreeOut? = null,
+    /** moderator / dictator — показать ссылку на панель модерации. */
+    val staff: String? = null,
+    /** Ограничен модератором (только читать): until/forever/reason. */
+    val restriction: SanctionOut? = null,
 )
 
 /** Чужой профиль по id. */
@@ -69,6 +75,10 @@ data class UserProfileOut(
     val createdAt: Instant,
     /** Год регистрации строкой ("2023") — для «в сети с …». */
     val memberSince: String,
+    /** Указ верховного диктатора — плашка в профиле. */
+    val decree: DecreeOut? = null,
+    /** Аккаунт заблокирован модератором: показать «страница заблокирована». */
+    val banned: Boolean = false,
 )
 
 /** Короткая карточка — для списков (участники, друзья, поиск). */

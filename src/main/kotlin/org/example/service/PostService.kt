@@ -748,6 +748,8 @@ class PostService(
     }
 
     private fun requireMemberOf(p: Post, me: UUID) {
+        // замороженное модерацией сообщество — только читать (V20)
+        p.communityId?.let { cid -> org.example.domain.Community.findById(cid)?.let { communities.requireNotFrozen(it) } }
         if (p.isPulse) return // пульс — общая лента: лайкать и комментировать может любой
         val cid = p.communityId ?: return
         if (communities.roleOf(cid, me) == null) throw ApiException.forbidden("нужно вступить в сообщество")

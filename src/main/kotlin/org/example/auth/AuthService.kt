@@ -34,7 +34,26 @@ class AuthService(
     private val allowDevTokens: Boolean,
     @ConfigProperty(name = "straycatz.auth.username-claim", defaultValue = "preferred_username")
     private val usernameClaim: String,
+    /** Имя realm-роли модератора в Keycloak. */
+    @ConfigProperty(name = "straycatz.moderation.moderator-role", defaultValue = "moderator")
+    private val moderatorRole: String,
+    /** Имя realm-роли верховного диктатора в Keycloak. */
+    @ConfigProperty(name = "straycatz.moderation.dictator-role", defaultValue = "dictator")
+    private val dictatorRole: String,
+    /** Только для dev-токенов: "uuid=dictator,uuid=moderator". */
+    @ConfigProperty(name = "straycatz.auth.dev-staff", defaultValue = " ")
+    private val devStaff: String,
 ) {
+    private val devRoles: Map<UUID, Set<String>> = devStaff.split(',').mapNotNull { part ->
+        val (id, role) = part.split('=').map { it.trim() }.takeIf { it.size == 2 } ?: return@mapNotNull null
+        val uid = runCatching { UUID.fromString(id) }.getOrNull() ?: return@mapNotNull null
+        uid to when (role) {
+            Staff.DICTATOR -> setOf(Staff.DICTATOR, Staff.MODERATOR)
+            Staff.MODERATOR -> setOf(Staff.MODERATOR)
+            else -> return@mapNotNull null
+        }
+    }.toMap()
+
     private val jwtParser = DefaultJWTParser(
         JWTAuthContextInfo().apply {
             val realmUrl = "${keycloakUrl.trimEnd('/')}/realms/$realm"
@@ -83,7 +102,8 @@ class AuthService(
             ?: return AuthResult.Invalid
         val username = claimString(jwt.getClaim<Any>(usernameClaim)) ?: return AuthResult.Invalid
         val email = claimString(jwt.getClaim<Any>("email"))
-        return when (val r = users.ensure(userId, username)) {
+        val roles = platformRoles(jwt.getClaim<Any>("realm_access"))
+        return when (val r = users.ensure(userId, username, roles)) {
             is AuthResult.Ok -> AuthResult.Ok(r.ticket.copy(email = email))
             else -> r
         }
@@ -91,9 +111,23 @@ class AuthService(
 
     private fun claimString(v: Any?): String? = v?.toString()?.trim('"')?.takeIf { it.isNotBlank() }
 
+    /**
+     * realm_access = {"roles": ["moderator", "offline_access", …]} → наши роли.
+     * Claim приходит как JsonObject — его toString() это JSON, разбираем без лишних зависимостей.
+     */
+    private fun platformRoles(v: Any?): Set<String> {
+        val json = v?.toString() ?: return emptySet()
+        val list = Regex("\"roles\"\\s*:\\s*\\[(.*?)]", RegexOption.DOT_MATCHES_ALL).find(json)?.groupValues?.get(1) ?: return emptySet()
+        val names = Regex("\"([^\"]+)\"").findAll(list).map { it.groupValues[1] }.toSet()
+        return buildSet {
+            if (dictatorRole in names) { add(Staff.DICTATOR); add(Staff.MODERATOR) }
+            if (moderatorRole in names) add(Staff.MODERATOR)
+        }
+    }
+
     private fun fromDevToken(value: String): AuthResult {
         val userId = runCatching { UUID.fromString(value.trim()) }.getOrNull() ?: return AuthResult.Invalid
-        return users.existing(userId)
+        return users.existing(userId, devRoles[userId].orEmpty())
     }
 }
 

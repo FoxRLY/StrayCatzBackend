@@ -8,10 +8,19 @@ import jakarta.ws.rs.core.Response
 import jakarta.ws.rs.ext.ExceptionMapper
 import jakarta.ws.rs.ext.Provider
 
-/** Единый формат ошибок REST: `{ "code": "...", "message": "..." }` + HTTP-статус. */
-data class ApiError(val code: String, val message: String)
+/**
+ * Единый формат ошибок REST: `{ "code": "...", "message": "..." }` + HTTP-статус.
+ * details — только у некоторых ошибок (бан/ограничение: until, reason).
+ */
+@com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+data class ApiError(val code: String, val message: String, val details: Map<String, Any?>? = null)
 
-class ApiException(val status: Int, val code: String, message: String) : RuntimeException(message) {
+class ApiException(
+    val status: Int,
+    val code: String,
+    message: String,
+    val details: Map<String, Any?>? = null,
+) : RuntimeException(message) {
     companion object {
         fun badRequest(code: String, msg: String) = ApiException(400, code, msg)
         fun unauthorized(msg: String = "нужен валидный токен") = ApiException(401, "unauthorized", msg)
@@ -21,12 +30,12 @@ class ApiException(val status: Int, val code: String, message: String) : Runtime
     }
 }
 
-private fun json(status: Int, code: String, message: String): Response =
-    Response.status(status).type(MediaType.APPLICATION_JSON).entity(ApiError(code, message)).build()
+private fun json(status: Int, code: String, message: String, details: Map<String, Any?>? = null): Response =
+    Response.status(status).type(MediaType.APPLICATION_JSON).entity(ApiError(code, message, details)).build()
 
 @Provider
 class ApiExceptionMapper : ExceptionMapper<ApiException> {
-    override fun toResponse(e: ApiException): Response = json(e.status, e.code, e.message ?: e.code)
+    override fun toResponse(e: ApiException): Response = json(e.status, e.code, e.message ?: e.code, e.details)
 }
 
 /** Гонка на unique-индексе (два одновременных запроса) — отдаём 409, а не 500. */

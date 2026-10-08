@@ -486,3 +486,11 @@ insert into user_presence (user_id, status, doing, updated_at) values
                                                                    ('22222222-2222-2222-2222-222222222222', 'online', 'собираю клавиатуру', now()),
                                                                    ('33333333-3333-3333-3333-333333333333', 'away', null, now())
 on conflict (user_id) do update set status = excluded.status, doing = excluded.doing, updated_at = excluded.updated_at;
+
+-- Модерация (V20/V21): alice — верховный диктатор, carol — модератор.
+-- Роль из staff_grant действует и с dev-токеном (Dev <uuid>), и с настоящим JWT из Keycloak.
+-- Себя сделать диктатором: straycatz.moderation.dictators=<твой username> (или env STRAYCATZ_DICTATORS).
+insert into staff_grant (user_id, role, note) values
+                                                  ('11111111-1111-1111-1111-111111111111', 'dictator', 'dev seed'),
+                                                  ('33333333-3333-3333-3333-333333333333', 'moderator', 'dev seed')
+on conflict (user_id) do update set role = excluded.role;

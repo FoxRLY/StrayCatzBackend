@@ -163,6 +163,21 @@ class KeycloakClient(
         }
     }
 
+    /**
+     * Выдать / снять realm-роль (модератор). Сервисному аккаунту нужны realm-management:
+     * manage-users и view-realm (чтобы прочитать роль). Роль появится в токене человека
+     * после обновления токена (refresh) — до 5 минут.
+     */
+    fun setRealmRole(id: UUID, roleName: String, granted: Boolean) {
+        val role = admin("GET", "/roles/${URLEncoder.encode(roleName, Charsets.UTF_8)}", null)
+        if (role.statusCode() == 404) throw ApiException(500, "role_missing", "в Keycloak нет realm-роли $roleName — создай её")
+        if (role.statusCode() != 200) throw upstream(role)
+        val rep = mapper.readTree(role.body())
+        val r = admin(if (granted) "POST" else "DELETE", "/users/$id/role-mappings/realm", listOf(rep))
+        if (r.statusCode() == 404) throw ApiException.notFound("человека нет в Keycloak")
+        if (r.statusCode() != 204) throw upstream(r)
+    }
+
     // ------------------------------------------------------------ plumbing
 
     private fun admin(method: String, path: String, body: Any?, retried: Boolean = false): HttpResponse<String> {

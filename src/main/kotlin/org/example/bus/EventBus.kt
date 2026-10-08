@@ -64,11 +64,14 @@ class EventBus(
         /** Кадров в очереди одного сокета, после которых считаем клиента зависшим. */
         const val MAX_PENDING = 1000
         const val SLOW_CONSUMER = 4508
+        const val BANNED = 4410
         private const val BUFFER_KEY = "straycatz.bus.buffer"
         private const val T_FRAME = 'F'
         private const val T_POINTER = 'P'
         private const val T_CONTROL = 'C'
         private const val CTL_CHATS = "chats"
+        /** Человека заблокировали: отправить ему account.banned и закрыть его соединения. */
+        private const val CTL_KICK = "kick"
     }
 
     private val transport: BusTransport = if (transportName.equals("pg", ignoreCase = true)) pg else redis
@@ -150,6 +153,15 @@ class EventBus(
         enqueue(userIds.distinct().map { userCh(it) to payload })
     }
 
+    /**
+     * Бан: на всех нодах соединения человека получат кадр [frame] и закроются кодом 4410.
+     * После COMMIT, как и всё остальное.
+     */
+    @Transactional
+    fun kickUser(userId: UUID, frame: Envelope) {
+        enqueue(listOf(userCh(userId) to wire(T_CONTROL, "", CTL_KICK + "|" + text(frame))))
+    }
+
     // ================================================================ подключения этой ноды
 
     /** Новое соединение: подписаться на человека и его чаты. */
@@ -201,7 +213,10 @@ class EventBus(
             val scope = key[0]
             val id = UUID.fromString(key.substring(2))
             when (type) {
-                T_CONTROL -> if (scope == 'u' && body == CTL_CHATS) refreshChats(listOf(id))
+                T_CONTROL -> when {
+                    scope == 'u' && body == CTL_CHATS -> refreshChats(listOf(id))
+                    scope == 'u' && body.startsWith("$CTL_KICK|") -> kick(registry.connectionIdsOf(id), body.substringAfter('|'))
+                }
                 T_FRAME -> deliver(targets(scope, id, flags), body)
                 T_POINTER -> {
                     val targets = targets(scope, id, flags)
@@ -238,6 +253,16 @@ class EventBus(
             conn.sendText(text).subscribe().with(
                 { st.pending.decrementAndGet() },
                 { e -> st.pending.decrementAndGet(); Log.debugf("шина: не смогли отправить в %s: %s", cid, e.message) },
+            )
+        }
+    }
+
+    private fun kick(connectionIds: Set<String>, text: String) {
+        for (cid in connectionIds) {
+            val conn = openConnections.findByConnectionId(cid).orElse(null) ?: continue
+            conn.sendText(text).subscribe().with(
+                { conn.close(CloseReason(BANNED, "account banned")).subscribe().with({}, {}) },
+                { conn.close(CloseReason(BANNED, "account banned")).subscribe().with({}, {}) },
             )
         }
     }

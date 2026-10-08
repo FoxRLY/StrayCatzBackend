@@ -10,6 +10,9 @@ import org.example.domain.UserCosmetics
 import org.example.domain.UserLevel
 import org.example.rest.AccountOut
 import org.example.rest.ApiException
+import org.example.rest.DecreeOut
+import org.example.rest.SanctionOut
+import org.example.auth.Staff
 import org.example.rest.UpdateProfileIn
 import org.example.rest.UserProfileOut
 import org.example.rest.UserShortOut
@@ -49,6 +52,11 @@ class UserProfileService(
             memberSince = year(u.createdAt),
             mood = Room.findById(u.id)?.mood,
             roomTitle = Room.findById(u.id)?.title,
+            decree = decreesOf(listOf(u.id))[u.id],
+            staff = ticket.staffRole,
+            restriction = ticket.restrictedUntil?.takeIf { ticket.isRestricted }?.let {
+                SanctionOut(it.takeIf { u2 -> u2 < Staff.FOREVER }, it >= Staff.FOREVER, ticket.restrictReason)
+            },
         )
     }
 
@@ -67,7 +75,30 @@ class UserProfileService(
             level = l?.level ?: 0,
             createdAt = u.createdAt,
             memberSince = year(u.createdAt),
+            decree = decreesOf(listOf(u.id))[u.id],
+            banned = isBanned(u),
         )
+    }
+
+    fun isBanned(u: AppUser): Boolean = u.bannedUntil?.isAfter(Instant.now()) == true
+
+    /** Действующие указы диктатора пачкой. */
+    @Suppress("UNCHECKED_CAST")
+    @Transactional
+    fun decreesOf(ids: Collection<UUID>): Map<UUID, DecreeOut> {
+        if (ids.isEmpty()) return emptyMap()
+        return (em.createNativeQuery(
+            "select user_id, text, emoji, color, issued_at from user_decree where user_id in (?1) and revoked_at is null",
+        ).setParameter(1, ids.distinct()).resultList as List<Array<Any?>>).associate {
+            (it[0] as UUID) to DecreeOut(it[1] as String, it[2] as String?, it[3] as String?, toInstant(it[4]))
+        }
+    }
+
+    private fun toInstant(v: Any?): Instant = when (v) {
+        is Instant -> v
+        is java.time.OffsetDateTime -> v.toInstant()
+        is java.sql.Timestamp -> v.toInstant()
+        else -> Instant.EPOCH
     }
 
     @Transactional

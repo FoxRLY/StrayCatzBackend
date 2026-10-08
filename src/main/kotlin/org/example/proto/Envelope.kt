@@ -105,6 +105,8 @@ object CloseCodes {
     const val UNAUTHORIZED = 4401      // нет/битый/просроченный токен
     const val FORBIDDEN = 4403        // полез в чужой чат
     const val TOO_MANY_CONNECTIONS = 4409
+    /** Аккаунт заблокирован модератором — не переподключаться, показать экран бана (GET любого REST → details). */
+    const val BANNED = 4410
 }
 
 class EnvelopeCodec(private val mapper: ObjectMapper) {

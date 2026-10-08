@@ -156,6 +156,11 @@ class CommunityService(
             bannerFocus = c.bannerFocus,
             tags = tags.tagsOf(TagService.Owner.COMMUNITY, listOf(c.id))[c.id] ?: emptyList(),
             mirror = if (c.source != null) mirrorOf(c, me) else null,
+            frozen = runCatching { requireNotFrozen(c); null }.getOrElse { e ->
+                (e as? ApiException)?.details?.let {
+                    org.example.rest.SanctionOut(it["until"] as Instant?, it["forever"] == true, it["reason"] as String?)
+                }
+            },
         )
     }
 
@@ -495,7 +500,39 @@ class CommunityService(
 
     fun bySlug(slug: String): Community =
         Community.find("lower(slug) = ?1 and isDeleted = false", slug.trim().lowercase()).firstResult()
-            ?: throw ApiException.notFound("сообщество не найдено")
+            ?: throw blockedOrMissing(slug)
+
+    /** Заблокированное модератором (V20) — 451 с причиной; иначе 404. */
+    private fun blockedOrMissing(slug: String): ApiException {
+        @Suppress("UNCHECKED_CAST")
+        val row = (em.createNativeQuery(
+            "select block_reason, name from community where lower(slug) = ?1 and blocked_at is not null limit 1",
+        ).setParameter(1, slug.trim().lowercase()).resultList as List<Array<Any?>>).firstOrNull()
+            ?: return ApiException.notFound("сообщество не найдено")
+        return ApiException(
+            451, "community_blocked", "сообщество «${row[1]}» заблокировано модерацией" + ((row[0] as String?)?.let { ": $it" } ?: ""),
+            mapOf("reason" to row[0], "name" to row[1]),
+        )
+    }
+
+    /** Заморожено модератором: читать можно, писать/создавать — нет. */
+    fun requireNotFrozen(c: Community) {
+        @Suppress("UNCHECKED_CAST")
+        val row = (em.createNativeQuery("select frozen_until, freeze_reason from community where id = ?1 and frozen_until > now()")
+            .setParameter(1, c.id).resultList as List<Array<Any?>>).firstOrNull() ?: return
+        val until = when (val v = row[0]) {
+            is Instant -> v
+            is java.time.OffsetDateTime -> v.toInstant()
+            is java.sql.Timestamp -> v.toInstant()
+            else -> null
+        }
+        val forever = until != null && until >= org.example.auth.Staff.FOREVER
+        throw ApiException(
+            403, "community_frozen",
+            "сообщество заморожено модерацией" + (if (forever) "" else " до $until") + ((row[1] as String?)?.let { ": $it" } ?: ""),
+            mapOf("until" to until?.takeIf { !forever }, "forever" to forever, "reason" to row[1]),
+        )
+    }
 
     fun roleOf(communityId: UUID, userId: UUID): String? = activeMember(communityId, userId)?.role
 
@@ -507,6 +544,7 @@ class CommunityService(
         // зеркало Telegram: писать/создавать/администрировать нельзя никому — только читать,
         // лайкать и комментировать (это идёт мимо requireRole)
         if (c.source != null) throw ApiException(403, "mirror_readonly", "это зеркало Telegram-канала — сюда нельзя писать")
+        requireNotFrozen(c)
         val role = activeMember(c.id, me)?.role
         if (rank(role) < rank(min)) {
             throw ApiException.forbidden(

@@ -118,6 +118,8 @@ class RoomService(
             owner = RoomOwnerOut(
                 owner.id, owner.username, cosmetics?.avatar, cosmetics?.color, cosmetics?.tagline,
                 level?.level ?: 0, level?.xp ?: 0, owner.createdAt.atZone(java.time.ZoneOffset.UTC).year.toString(),
+                decree = profiles.decreesOf(listOf(owner.id))[owner.id],
+                banned = profiles.isBanned(owner),
             ),
             isOwner = isOwner,
             friendship = friends.stateBetween(viewer, owner.id),

@@ -23,6 +23,10 @@ data class RoomOwnerOut(
     val xp: Int,
     /** Год регистрации строкой: "2023" (для «в сети с 2023»). */
     val memberSince: String,
+    /** Указ верховного диктатора — неснимаемая плашка. */
+    val decree: DecreeOut? = null,
+    /** Аккаунт заблокирован модератором. */
+    val banned: Boolean = false,
 )
 
 @JsonInclude(JsonInclude.Include.ALWAYS)

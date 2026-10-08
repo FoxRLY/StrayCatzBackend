@@ -131,6 +131,10 @@ class AccountService(
     private fun ticketFrom(accessToken: String): AuthTicket = when (val r = auth.resolveAccessToken(accessToken)) {
         is AuthResult.Ok -> r.ticket
         AuthResult.Blocked -> throw ApiException.forbidden("аккаунт удалён или заблокирован")
+        is AuthResult.Banned -> throw ApiException(
+            403, "account_banned", "аккаунт заблокирован" + (r.reason?.let { ": $it" } ?: ""),
+            mapOf("until" to r.until.takeIf { it < org.example.auth.Staff.FOREVER }, "forever" to (r.until >= org.example.auth.Staff.FOREVER), "reason" to r.reason),
+        )
         else -> {
             // Keycloak выдал токен, а мы его не приняли — почти всегда это
             // расхождение issuer (straycatz.keycloak.url vs KC_HOSTNAME)

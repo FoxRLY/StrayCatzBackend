@@ -110,6 +110,8 @@ data class CommunityPageOut(
     val tags: List<String> = emptyList(),
     /** Зеркало Telegram-канала: писать нельзя, кнопки «написать/обсуждение/событие» скрыть. */
     val mirror: MirrorOut? = null,
+    /** Заморожено модерацией (V20): только читать — кнопки «написать», комментарии, лайки скрыть, показать плашку. */
+    val frozen: SanctionOut? = null,
 )
 
 data class CommunityListOut(val items: List<CommunityCardOut>, val total: Long)

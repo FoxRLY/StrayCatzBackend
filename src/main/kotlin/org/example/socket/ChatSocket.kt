@@ -46,6 +46,7 @@ class ChatSocket(
     private val presence: PresenceService,
     private val calls: CallService,
     private val chatActions: ChatActionsService,
+    private val gate: org.example.service.ModerationGate,
 ) {
     companion object {
         const val MAX_CONNECTIONS_PER_USER = 5
@@ -60,6 +61,12 @@ class ChatSocket(
             // приходит сам, пока чат открыт на экране
             FrameTypes.MESSAGE_READ,
         )
+
+        /** Что нельзя ограниченному модератором (V20): писать, реагировать, звонить, «печатает». */
+        val WRITE_FRAMES = setOf(
+            FrameTypes.MESSAGE_SEND, FrameTypes.MESSAGE_EDIT, FrameTypes.MESSAGE_FORWARD,
+            FrameTypes.REACTION_ADD, FrameTypes.REACTION_REMOVE, FrameTypes.CALL_INVITE, FrameTypes.TYPING,
+        )
     }
 
     private val codec = EnvelopeCodec(mapper)
@@ -71,6 +78,7 @@ class ChatSocket(
         val ticket = when (val r = auth.resolve(header)) {
             is AuthResult.Ok -> r.ticket
             AuthResult.Blocked -> return close(CloseCodes.FORBIDDEN, "user blocked")
+            is AuthResult.Banned -> return close(CloseCodes.BANNED, "account banned")
             AuthResult.Missing, AuthResult.Invalid -> return close(CloseCodes.UNAUTHORIZED, "bad or expired token")
         }
         if (registry.connectionCount(ticket.userId) >= MAX_CONNECTIONS_PER_USER) {
@@ -108,6 +116,16 @@ class ChatSocket(
         } catch (e: Exception) {
             Log.debugf("не смогли распарсить кадр: %s | raw=%s", e.message, raw.take(500))
             return sendError(null, ErrorCodes.BAD_FRAME, "не смогли распарсить кадр: ${e.message?.take(200)}")
+        }
+
+        // модерация: бан закрывает соединение, ограничение — «только читать»
+        if (env.t != FrameTypes.PING) {
+            val g = gate.status(st.userId)
+            if (g.banned) return close(CloseCodes.BANNED, "account banned")
+            if (g.restricted && env.t in WRITE_FRAMES) {
+                if (env.t == FrameTypes.TYPING) return
+                return sendError(env.rid, "account_restricted", "аккаунт ограничен модератором — можно только читать")
+            }
         }
 
         // любое «живое» действие — человек здесь (ping шлёт сам клиент, это не действие)
