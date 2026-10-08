@@ -24,11 +24,14 @@ import java.util.UUID
 class VideoResource(
     private val currentUser: CurrentUser,
     private val videos: VideoService,
+    private val recommend: org.example.service.RecommendService,
 ) {
     /**
      * ?scope=feed|all|mine|friends|community|user (feed по умолчанию)
      * &slug= (для community) &userId= (для user) &q= (поиск по подписи/тексту записи)
      * &sort=new|popular &limit=24; дальше ?before=<nextBefore> или ?offset=<nextOffset>.
+     * &hideSlop=true — без роликов из записей с плашкой «ИИ слоп».
+     * &algo=true (только scope=feed без q/tag) — умная лента, дальше ?algo=true&cursor=<nextCursor>.
      */
     @GET
     fun list(
@@ -42,7 +45,17 @@ class VideoResource(
         @QueryParam("offset") @DefaultValue("0") offset: Int,
         @QueryParam("limit") @DefaultValue("24") limit: Int,
         @QueryParam("tag") tag: String?,
-    ): VideoPageOut = videos.list(me(auth), scope, slug, userId, q, sort, parseInstantParam(before, "before"), offset, limit, tag)
+        @QueryParam("algo") @DefaultValue("false") algo: Boolean,
+        @QueryParam("cursor") cursor: String?,
+        @QueryParam("hideSlop") @DefaultValue("false") hideSlop: Boolean,
+    ): VideoPageOut {
+        val me = me(auth)
+        // умная лента — только для основной вкладки (scope=feed, без поиска и тега)
+        if (algo && (scope == null || scope.equals("feed", true)) && q.isNullOrBlank() && tag.isNullOrBlank()) {
+            return recommend.video(me, cursor, limit, hideSlop)
+        }
+        return videos.list(me, scope, slug, userId, q, sort, parseInstantParam(before, "before"), offset, limit, tag, hideSlop)
+    }
 
     /** Загрузить в «мои видео» без записи: {mediaId, title?, durationSec?, posterMediaId?} → 201. */
     @POST

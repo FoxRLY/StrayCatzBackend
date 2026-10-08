@@ -43,19 +43,20 @@ class MarketResource(
         @QueryParam("condition") condition: String?,
         @QueryParam("seller") seller: String?,
         @QueryParam("status") status: String?,
+        @QueryParam("community") community: String?,
         @QueryParam("before") before: String?,
         @QueryParam("limit") @DefaultValue("30") limit: Int,
     ): MarketPageOut = market.search(
         me(auth), q, category, city, minPrice, maxPrice, free, condition, seller, status,
-        parseInstantParam(before, "before"), limit,
+        parseInstantParam(before, "before"), limit, community,
     )
 
     /** Категории с числом активных объявлений. */
     @GET
     @Path("/categories")
-    fun categories(@HeaderParam("Authorization") auth: String?): List<MarketCategoryOut> {
+    fun categories(@HeaderParam("Authorization") auth: String?, @QueryParam("community") community: String?): List<MarketCategoryOut> {
         me(auth)
-        return market.categories()
+        return market.categories(community?.takeIf { it.isNotBlank() })
     }
 
     /** Моё избранное. */
@@ -114,6 +115,60 @@ class MarketResource(
     @Path("/{id}/contact")
     fun contact(@HeaderParam("Authorization") auth: String?, @PathParam("id") id: UUID, req: MarketContactIn?): MarketContactOut =
         market.contact(me(auth), id, req?.text)
+
+    private fun me(auth: String?): UUID = currentUser.require(auth).userId
+}
+
+/**
+ * Вкладка «Барахолка» сообщества. Те же объявления, что в /api/market, только с community_id.
+ * Карточка, правка, статусы, избранное, «написать продавцу» — общими ручками /api/market/{id}.
+ */
+@Path("/api/communities/{slug}/market")
+@Produces(MediaType.APPLICATION_JSON)
+@Consumes(MediaType.APPLICATION_JSON)
+class CommunityMarketResource(
+    private val currentUser: CurrentUser,
+    private val market: MarketService,
+) {
+    @GET
+    fun list(
+        @HeaderParam("Authorization") auth: String?,
+        @PathParam("slug") slug: String,
+        @QueryParam("q") q: String?,
+        @QueryParam("category") category: String?,
+        @QueryParam("city") city: String?,
+        @QueryParam("minPrice") minPrice: BigDecimal?,
+        @QueryParam("maxPrice") maxPrice: BigDecimal?,
+        @QueryParam("free") free: Boolean?,
+        @QueryParam("condition") condition: String?,
+        @QueryParam("seller") seller: String?,
+        @QueryParam("status") status: String?,
+        @QueryParam("before") before: String?,
+        @QueryParam("limit") @DefaultValue("30") limit: Int,
+    ): MarketPageOut = market.search(
+        me(auth), q, category, city, minPrice, maxPrice, free, condition, seller, status,
+        parseInstantParam(before, "before"), limit, slug,
+    )
+
+    @GET
+    @Path("/categories")
+    fun categories(@HeaderParam("Authorization") auth: String?, @PathParam("slug") slug: String): List<MarketCategoryOut> {
+        me(auth)
+        return market.categories(slug)
+    }
+
+    /** Выставить объявление сразу в барахолку сообщества → 201. */
+    @POST
+    fun create(@HeaderParam("Authorization") auth: String?, @PathParam("slug") slug: String, req: MarketItemIn?): Response =
+        Response.status(201).entity(market.create(me(auth), req ?: MarketItemIn(), slug)).build()
+
+    /** Убрать из барахолки сообщества (админ сообщества или продавец). Объявление не удаляется. */
+    @DELETE
+    @Path("/{id}")
+    fun remove(@HeaderParam("Authorization") auth: String?, @PathParam("slug") slug: String, @PathParam("id") id: UUID): Response {
+        market.removeFromCommunity(me(auth), slug, id)
+        return Response.noContent().build()
+    }
 
     private fun me(auth: String?): UUID = currentUser.require(auth).userId
 }

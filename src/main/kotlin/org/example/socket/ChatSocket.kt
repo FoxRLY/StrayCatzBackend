@@ -1,4 +1,4 @@
-package org.example
+package org.example.socket
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.quarkus.logging.Log
@@ -56,7 +56,7 @@ class ChatSocket(
         /** Служебные кадры — не считаются действием человека (не сбрасывают «отошёл»). */
         val PASSIVE_FRAMES = setOf(
             FrameTypes.PING, FrameTypes.PRESENCE_QUERY, FrameTypes.CHAT_CLOSE, FrameTypes.ROOM_CLOSE, FrameTypes.HELLO,
-            FrameTypes.COMMUNITY_CLOSE,
+            FrameTypes.COMMUNITY_CLOSE, FrameTypes.RADIO_CLOSE,
             // приходит сам, пока чат открыт на экране
             FrameTypes.MESSAGE_READ,
         )
@@ -134,6 +134,9 @@ class ChatSocket(
                 // подписка на голосовые каналы сообщества — тот же механизм, что у комнат (ключ — id сообщества)
                 FrameTypes.COMMUNITY_OPEN -> bus.openRoom(st.connectionId, codec.payloadAs(env, CommunityOpenIn::class.java).communityId)
                 FrameTypes.COMMUNITY_CLOSE -> bus.closeRoom(st.connectionId, codec.payloadAs(env, CommunityOpenIn::class.java).communityId)
+                // радио: id станции — тоже ключ комнаты в шине (UUID не пересекаются)
+                FrameTypes.RADIO_OPEN -> bus.openRoom(st.connectionId, codec.payloadAs(env, RadioOpenIn::class.java).stationId)
+                FrameTypes.RADIO_CLOSE -> bus.closeRoom(st.connectionId, codec.payloadAs(env, RadioOpenIn::class.java).stationId)
                 FrameTypes.PING -> send(FrameTypes.PONG, null, env.rid)
                 FrameTypes.REACTION_ADD, FrameTypes.REACTION_REMOVE -> handleReaction(st, env)
 

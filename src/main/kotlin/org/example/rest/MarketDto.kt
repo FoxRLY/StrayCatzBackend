@@ -27,6 +27,11 @@ data class MarketItemIn(
     val contacts: String? = null,
     /** Фото: до 10 картинок из POST /api/media (порядок = порядок показа, первая — обложка). В PATCH — заменяет все. */
     val mediaIds: List<UUID>? = null,
+    /**
+     * Выставить в барахолку сообщества (slug). Нужно быть участником, и у сообщества должен быть
+     * включён раздел market. В PATCH: slug — перенести, "" — убрать из сообщества.
+     */
+    val communitySlug: String? = null,
 )
 
 /** active / reserved / sold */
@@ -43,6 +48,8 @@ data class MyMarketOut(
     /** Моё объявление: можно править, менять статус, поднимать. */
     val mine: Boolean,
     val favorite: Boolean,
+    /** Показать «Убрать из барахолки сообщества»: я продавец или админ этого сообщества. */
+    val canRemoveFromCommunity: Boolean = false,
 )
 
 @JsonInclude(JsonInclude.Include.ALWAYS)
@@ -77,6 +84,8 @@ data class MarketItemOut(
     val bumpedAt: Instant,
     /** Когда можно снова «поднять» (для своих). */
     val canBumpAt: Instant?,
+    /** Барахолка какого сообщества (плашка), null — просто объявление. */
+    val community: PostCommunityOut? = null,
 )
 
 data class MarketPageOut(

@@ -71,6 +71,8 @@ data class LentaItemOut(
     val roomOwner: UserShortOut?,
     /** reply: ответ мне; ответить — POST /api/posts/{post.id}/comments {parentId: comment.id}. */
     val comment: CommentOut?,
+    /** Только в умной ленте (?algo=true): почему показано. */
+    val reason: RecommendReasonOut? = null,
 )
 
 /** Тумблер источника: ключ, подпись и сколько нового за 24 часа. */
@@ -85,4 +87,6 @@ data class LentaPageOut(
     val sources: List<LentaSourceOut>,
     /** Сумма today по всем источникам. */
     val today: Long,
+    /** Умная лента (?algo=true): следующая страница — ?algo=true&cursor=<nextCursor>. */
+    val nextCursor: String? = null,
 )

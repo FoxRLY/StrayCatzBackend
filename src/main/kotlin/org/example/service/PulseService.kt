@@ -58,9 +58,9 @@ class PulseService(
     }
 
     @Transactional
-    fun list(me: UUID, sortRaw: String?, before: Instant?, offset: Int, limit: Int, tag: String? = null): PulsePageOut {
+    fun list(me: UUID, sortRaw: String?, before: Instant?, offset: Int, limit: Int, tag: String? = null, hideSlop: Boolean = false): PulsePageOut {
         // тег уже нормализован (только буквы/цифры/_), поэтому его можно подставить литералом
-        val baseWhere = BASE_WHERE + (tag?.takeIf { it.isNotBlank() }?.let { raw ->
+        val baseWhere = BASE_WHERE + (if (hideSlop) " and p.ai_slop_at is null" else "") + (tag?.takeIf { it.isNotBlank() }?.let { raw ->
             val t = TagService.normalize(raw) ?: return PulsePageOut(emptyList(), false, (sortRaw ?: "hot").lowercase(), null, null)
             " and exists (select 1 from tag_link tl where tl.owner_type = 'post' and tl.owner_id = p.id and tl.tag = '$t')"
         } ?: "")

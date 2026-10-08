@@ -58,6 +58,9 @@ data class TypingIn(val chatId: UUID)
 /** community.open / community.close */
 data class CommunityOpenIn(val communityId: UUID)
 
+/** radio.open / radio.close */
+data class RadioOpenIn(val stationId: UUID)
+
 data class PresenceSetIn(
     val status: String? = null,      // online / away / dnd / invisible
     val doing: String? = null,

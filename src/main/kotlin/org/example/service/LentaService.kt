@@ -57,6 +57,7 @@ class LentaService(
     private val events: EventService,
     private val discussions: DiscussionService,
     private val rooms: RoomService,
+    private val recommend: RecommendService,
 ) {
     companion object {
         const val MAX_PAGE = 50
@@ -92,7 +93,10 @@ class LentaService(
      * @param since      нижняя граница («только новое с момента, как я заходил»); по умолчанию нет.
      */
     @Transactional
-    fun lenta(me: UUID, sourcesRaw: String?, before: Instant?, since: Instant?, limit: Int, global: Boolean = false, withCounts: Boolean = true): LentaPageOut {
+    fun lenta(
+        me: UUID, sourcesRaw: String?, before: Instant?, since: Instant?, limit: Int, global: Boolean = false,
+        withCounts: Boolean = true, hideSlop: Boolean = false,
+    ): LentaPageOut {
         val size = limit.coerceIn(1, MAX_PAGE)
         val only = sourcesRaw?.split(',')?.map { it.trim().lowercase() }?.filter { it.isNotEmpty() }?.toSet()
         only?.firstOrNull { it !in SOURCES }?.let {
@@ -101,7 +105,7 @@ class LentaService(
         val fr = friends.friendIdsOf(me)
 
         val q = Sql()
-        val sql = union(q, me, fr, before ?: Instant.now().plusSeconds(60), since, only, perBranch = size + 1, global = global) +
+        val sql = union(q, me, fr, before ?: Instant.now().plusSeconds(60), since, only, perBranch = size + 1, global = global, hideSlop = hideSlop) +
                 " order by at desc, ref limit ${q.p(size + 1)}"
         val rows = rows(sql, q.params)
         val page = rows.take(size)
@@ -116,6 +120,60 @@ class LentaService(
         )
     }
 
+    /**
+     * Умная лента (?algo=true): подписки (всё, что в обычной ленте, за 7 дней) вперемешку с
+     * рекомендованными записями — похожее, друзья, популярное (см. [RecommendService]).
+     * sources фильтрует только подписки. Листается курсором nextCursor.
+     */
+    @Transactional
+    fun smart(me: UUID, sourcesRaw: String?, cursorRaw: String?, limit: Int, hideSlop: Boolean): LentaPageOut {
+        val c = recommend.parseCursor(cursorRaw)
+        val size = limit.coerceIn(1, MAX_PAGE)
+        val only = sourcesRaw?.split(',')?.map { it.trim().lowercase() }?.filter { it.isNotEmpty() }?.toSortedSet()
+        only?.firstOrNull { it !in SOURCES }?.let {
+            throw ApiException.badRequest("invalid_source", "источники: ${SOURCES.keys.joinToString()}")
+        }
+        val (subs, slots) = smartCache.get("$me:$hideSlop:${only?.joinToString(",")}:${c.asOf.toEpochMilli()}") {
+            val fr = friends.friendIdsOf(me)
+            val q = Sql()
+            val sql = union(q, me, fr, c.asOf, c.asOf.minus(java.time.Duration.ofDays(7)), only, perBranch = 300, hideSlop = hideSlop) +
+                " order by at desc, ref limit ${q.p(400)}"
+            val subRows = rows(sql, q.params)
+            subRows to recommend.mix(subRows.map(::smartKey), recommend.recommend(me, RecommendService.Surface.LENTA, c.asOf, hideSlop))
+        }
+        val page = slots.drop(c.offset).take(size)
+        val subByKey = subs.associateBy(::smartKey)
+        // рекомендованные записи → строки, как будто это обычная запись в ленте
+        @Suppress("UNCHECKED_CAST")
+        val recRows: Map<UUID, Row> = page.mapNotNull { it.recId }.let { ids ->
+            if (ids.isEmpty()) emptyMap() else
+                (em.createNativeQuery("select id, creator_id, as_community, community_id, created_at from post where id in (?1) and not is_deleted")
+                    .setParameter(1, ids).resultList as List<Array<Any?>>).associate {
+                    (it[0] as UUID) to Row("post", "recommended", it[0] as UUID, if (it[2] == true) null else it[1] as UUID, it[3] as UUID?, toInstant(it[4]), null)
+                }
+        }
+        val pageRows = page.mapNotNull { s -> s.recId?.let { recRows[it] } ?: subByKey[s.key] }
+        val reasons = page.mapNotNull { s -> (s.recId?.let { recRows[it] } ?: subByKey[s.key])?.let { itemKey(it) to s.reason } }.toMap()
+        val items = hydrate(pageRows, me).map { it.copy(reason = reasons[it.id]) }
+        val end = c.offset + page.size
+        val more = end < slots.size
+        val today = if (c.offset == 0) today(me, friends.friendIdsOf(me), false) else emptyMap()
+        return LentaPageOut(
+            items = items, hasMore = more, nextBefore = null,
+            sources = SOURCES.map { (k, label) -> LentaSourceOut(k, label, today[k] ?: 0) },
+            today = today.values.sum(),
+            nextCursor = if (more) RecommendService.Cursor(c.asOf, end).toString() else null,
+        )
+    }
+
+    private val smartCache = TtlCache<String, Pair<List<Row>, List<RecommendService.Slot>>>(10 * 60_000L, 2_000)
+
+    /** Ключ для дедупликации с рекомендациями: запись — "post:<id>". */
+    private fun smartKey(r: Row) = if (r.kind == "post") "post:${r.ref}" else itemKey(r)
+
+    /** Тот же ключ, что LentaItemOut.id. */
+    private fun itemKey(r: Row) = "${r.kind}:${r.ref}" + (r.actor?.let { ":$it" } ?: "")
+
     // ================================================================ сборка UNION
 
     /**
@@ -125,7 +183,7 @@ class LentaService(
      */
     private fun union(
         q: Sql, me: UUID, fr: List<UUID>, before: Instant, since: Instant?,
-        only: Set<String>?, perBranch: Int?, global: Boolean = false,
+        only: Set<String>?, perBranch: Int?, global: Boolean = false, hideSlop: Boolean = false,
     ): String {
         val m = q.p(me)
         // в global друзья не нужны — и параметр не заводим (Hibernate не любит неиспользованных)
@@ -155,7 +213,7 @@ class LentaService(
                    p.id as ref, case when p.as_community then null else p.creator_id end as actor,
                    p.community_id as ctx, p.created_at as at, null::text as extra
             from post p left join community c on c.id = p.community_id
-            where not p.is_deleted and (p.community_id is null or not c.is_deleted)
+            where not p.is_deleted and (p.community_id is null or not c.is_deleted)${if (hideSlop) " and p.ai_slop_at is null" else ""}
               and (p.community_id in $my or p.creator_id = $m
                    or (${inF("p.creator_id")} and not p.as_community) or ${inF("p.wall_user_id")})"""
 

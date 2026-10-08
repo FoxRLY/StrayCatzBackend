@@ -75,7 +75,7 @@ class VideoService(
     @Transactional
     fun list(
         me: UUID, scopeRaw: String?, slug: String?, userId: UUID?, query: String?,
-        sortRaw: String?, before: Instant?, offset: Int, limit: Int, tag: String? = null,
+        sortRaw: String?, before: Instant?, offset: Int, limit: Int, tag: String? = null, hideSlop: Boolean = false,
     ): VideoPageOut {
         val scope = (scopeRaw ?: "feed").lowercase()
         if (scope !in SCOPES) throw ApiException.badRequest("invalid_scope", "scope: $SCOPES")
@@ -118,6 +118,7 @@ class VideoService(
                 where += "v.author_id = ${p(uid)} and not v.as_community"
             }
         }
+        if (hideSlop) where += "(p.id is null or p.ai_slop_at is null)"
         tag?.takeIf { it.isNotBlank() }?.let { raw ->
             val t = p(TagService.normalize(raw) ?: throw ApiException.badRequest("invalid_tag", "тег: 2–40 букв/цифр/_"))
             // тег самого ролика или записи, в которой он опубликован

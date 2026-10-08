@@ -241,6 +241,8 @@ data class PostOut(
     val aiSlop: Boolean = false,
     /** Сколько нажали «ИИ слоп». */
     val slopVotes: Long = 0,
+    /** Только в умной ленте (?algo=true): почему запись показана. Иначе null. */
+    val reason: RecommendReasonOut? = null,
 )
 
 /** kind: image / gif / video */
@@ -481,6 +483,8 @@ data class PulsePageOut(
     val sort: String,
     val nextBefore: Instant?,
     val nextOffset: Int?,
+    /** Умная лента (?algo=true / sort=smart): следующая страница — ?algo=true&cursor=<nextCursor>. */
+    val nextCursor: String? = null,
 )
 
 // ================================================================ теги
@@ -498,4 +502,22 @@ data class TagPageOut(
     val tracks: List<TrackOut>,
     val communities: List<PostCommunityOut>,
     val events: List<EventOut>,
+)
+
+// ================================================================ умная лента
+
+/**
+ * Почему элемент в умной ленте.
+ * kind: subscription (подписки: друзья и мои сообщества) / similar (похоже на то, что ты лайкал и апвоутил) /
+ * friends (это смотрят и лайкают друзья) / popular (популярно во всей сети).
+ */
+@com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_EMPTY)
+data class RecommendReasonOut(
+    val kind: String,
+    /** Готовая подпись: «похоже на #синти и #ночь», «нравится Пете и ещё 2», «популярно сейчас». */
+    val text: String,
+    /** friends: до 3 друзей, которым понравилось (аватарки). */
+    val friends: List<UserShortOut> = emptyList(),
+    /** similar: общие теги. */
+    val tags: List<String> = emptyList(),
 )

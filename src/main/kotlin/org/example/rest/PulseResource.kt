@@ -24,10 +24,12 @@ import java.util.UUID
 class PulseResource(
     private val currentUser: CurrentUser,
     private val pulse: PulseService,
+    private val recommend: org.example.service.RecommendService,
 ) {
     /**
      * ?sort=hot|new|friends|week (по умолчанию hot), ?limit=20.
      * Дальше: для new/friends — ?before=<nextBefore>, для hot/week — ?offset=<nextOffset>.
+     * &hideSlop=true — без «ИИ слопа». &algo=true (или sort=smart) — умная лента, дальше ?cursor=<nextCursor>.
      */
     @GET
     fun list(
@@ -37,7 +39,16 @@ class PulseResource(
         @QueryParam("offset") @DefaultValue("0") offset: Int,
         @QueryParam("limit") @DefaultValue("20") limit: Int,
         @QueryParam("tag") tag: String?,
-    ): PulsePageOut = pulse.list(currentUser.require(auth).userId, sort, parseInstantParam(before, "before"), offset, limit, tag)
+        @QueryParam("algo") @DefaultValue("false") algo: Boolean,
+        @QueryParam("cursor") cursor: String?,
+        @QueryParam("hideSlop") @DefaultValue("false") hideSlop: Boolean,
+    ): PulsePageOut {
+        val me = currentUser.require(auth).userId
+        // умная лента: ?algo=true или ?sort=smart (тег не поддерживается — с тегом обычный режим)
+        if ((algo || sort.equals("smart", true)) && tag.isNullOrBlank()) return recommend.pulse(me, cursor, limit, hideSlop)
+        val s = if (sort.equals("smart", true)) null else sort
+        return pulse.list(me, s, parseInstantParam(before, "before"), offset, limit, tag, hideSlop)
+    }
 
     /**
      * {body?, mediaIds?: [..до 4], poll?: {options, multiple?, closesInHours?},

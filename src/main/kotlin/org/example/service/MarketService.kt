@@ -4,6 +4,7 @@ import jakarta.enterprise.context.ApplicationScoped
 import jakarta.persistence.EntityManager
 import jakarta.transaction.Transactional
 import org.example.domain.AppUser
+import org.example.domain.Community
 import org.example.domain.Media
 import org.example.rest.ApiException
 import org.example.rest.MarketCategoryOut
@@ -12,6 +13,7 @@ import org.example.rest.MarketItemIn
 import org.example.rest.MarketItemOut
 import org.example.rest.MarketPageOut
 import org.example.rest.MyMarketOut
+import org.example.rest.PostCommunityOut
 import java.math.BigDecimal
 import java.text.DecimalFormat
 import java.text.DecimalFormatSymbols
@@ -25,6 +27,12 @@ import java.util.UUID
  * город, контакты свободным текстом и кнопка «написать продавцу» (личка).
  * Статусы: active → reserved (забронировано) → sold; удаление — status = deleted.
  * Лента — по bumped_at: новое и «поднятое» (раз в сутки) сверху.
+ *
+ * Барахолка сообщества (вкладка «Барахолка», V19): объявление может принадлежать сообществу
+ * (market_item.community_id). Выставить туда может участник (member+), если у сообщества включён
+ * раздел market; в зеркале Telegram — нельзя. Админ сообщества может «снять» объявление
+ * со своей барахолки (оно остаётся у продавца и в общей ленте). В общей ленте /api/market
+ * такие объявления видны с плашкой community.
  */
 @ApplicationScoped
 class MarketService(
@@ -35,6 +43,7 @@ class MarketService(
     private val chatAdmin: ChatManagementService,
     private val messages: MessageService,
     private val badges: BadgeService,
+    private val communities: CommunityService,
 ) {
     companion object {
         const val MAX_PAGE = 50
@@ -71,9 +80,14 @@ class MarketService(
 
     @Suppress("UNCHECKED_CAST")
     @Transactional
-    fun categories(): List<MarketCategoryOut> {
-        val counts = (em.createNativeQuery("select category, count(*) from market_item where status = 'active' group by category")
-            .resultList as List<Array<Any?>>).associate { (it[0] as String) to (it[1] as Number).toLong() }
+    fun categories(communitySlug: String? = null): List<MarketCategoryOut> {
+        val cid = communitySlug?.let { communities.bySlug(it).id }
+        val q = em.createNativeQuery(
+            "select category, count(*) from market_item where status = 'active'" +
+                (if (cid != null) " and community_id = ?1" else "") + " group by category",
+        )
+        if (cid != null) q.setParameter(1, cid)
+        val counts = (q.resultList as List<Array<Any?>>).associate { (it[0] as String) to (it[1] as Number).toLong() }
         return CATEGORIES.map { (code, v) -> MarketCategoryOut(code, v.first, v.second, counts[code] ?: 0) }
     }
 
@@ -86,6 +100,7 @@ class MarketService(
     fun search(
         me: UUID, q: String?, category: String?, city: String?, minPrice: BigDecimal?, maxPrice: BigDecimal?,
         free: Boolean?, condition: String?, seller: String?, status: String?, before: Instant?, limit: Int,
+        community: String? = null,
     ): MarketPageOut {
         val size = limit.coerceIn(1, MAX_PAGE)
         val params = mutableListOf<Any>()
@@ -119,6 +134,9 @@ class MarketService(
                 AppUser.find("username = ?1 and isDeleted = false", it.lowercase()).firstResult()?.id
                     ?: return MarketPageOut(emptyList(), false, null)
             where += "m.seller_id = ${p(uid)}"
+        }
+        community?.trim()?.takeIf { it.isNotEmpty() }?.let {
+            where += "m.community_id = ${p(communities.bySlug(it).id)}"
         }
         before?.let { where += "m.bumped_at < ${p(it)}" }
         val sql = "select m.id from market_item m where ${where.joinToString(" and ")} order by m.bumped_at desc limit ${p(size + 1)}"
@@ -155,7 +173,8 @@ class MarketService(
     // ================================================================ правка
 
     @Transactional
-    fun create(me: UUID, req: MarketItemIn): MarketItemOut {
+    fun create(me: UUID, req: MarketItemIn, communitySlug: String? = null): MarketItemOut {
+        val community = (communitySlug ?: req.communitySlug)?.trim()?.takeIf { it.isNotEmpty() }?.let { marketCommunity(me, it) }
         val today = (em.createNativeQuery("select count(*) from market_item where seller_id = ?1 and created_at > now() - interval '1 day'")
             .setParameter(1, me).singleResult as Number).toLong()
         if (today >= PER_DAY) throw ApiException(429, "market_quota", "не больше $PER_DAY объявлений в сутки")
@@ -163,8 +182,8 @@ class MarketService(
         val id = UUID.randomUUID()
         em.createNativeQuery(
             """
-            insert into market_item (id, seller_id, title, description, price, currency, category, condition, city, contacts)
-            values (?1, ?2, ?3, ?4, nullif(?5, -1), ?6, ?7, ?8, nullif(?9, ''), nullif(?10, ''))
+            insert into market_item (id, seller_id, title, description, price, currency, category, condition, city, contacts, community_id)
+            values (?1, ?2, ?3, ?4, nullif(?5, -1), ?6, ?7, ?8, nullif(?9, ''), nullif(?10, ''), cast(nullif(?11, '') as uuid))
             """.trimIndent(),
         ).setParameter(1, id).setParameter(2, me)
             .setParameter(3, title(req.title))
@@ -176,6 +195,7 @@ class MarketService(
             .setParameter(8, condition(req.condition ?: "used"))
             .setParameter(9, optional(req.city, MAX_CITY, "city") ?: "")
             .setParameter(10, optional(req.contacts, MAX_CONTACTS, "contacts") ?: "")
+            .setParameter(11, community?.id?.toString() ?: "")
             .executeUpdate()
         attachments.attach(AttachmentService.Owner.MARKET, id, photos)
         return render(listOf(id), me).first()
@@ -205,6 +225,11 @@ class MarketService(
         req.contacts?.let { v ->
             val c = optional(v, MAX_CONTACTS, "contacts")
             if (c == null) em.createNativeQuery("update market_item set contacts = null where id = ?1").setParameter(1, id).executeUpdate() else set("contacts", c)
+        }
+        req.communitySlug?.let { v ->
+            val c = v.trim().takeIf { it.isNotEmpty() }?.let { marketCommunity(me, it) }
+            em.createNativeQuery("update market_item set community_id = cast(nullif(?2, '') as uuid), updated_at = now() where id = ?1")
+                .setParameter(1, id).setParameter(2, c?.id?.toString() ?: "").executeUpdate()
         }
         req.mediaIds?.let { ids ->
             val photos = photos(me, ids)
@@ -240,6 +265,22 @@ class MarketService(
     fun delete(me: UUID, id: UUID) {
         own(me, id)
         em.createNativeQuery("update market_item set status = 'deleted', updated_at = now() where id = ?1").setParameter(1, id).executeUpdate()
+    }
+
+    /**
+     * Админ сообщества убирает объявление со своей барахолки. Объявление не удаляется:
+     * остаётся у продавца и в общей ленте. Продавец может и сам убрать — PATCH communitySlug: "".
+     */
+    @Transactional
+    fun removeFromCommunity(me: UUID, slug: String, id: UUID) {
+        val c = communities.bySlug(slug)
+        val n = em.createNativeQuery("select seller_id from market_item where id = ?1 and community_id = ?2 and status <> 'deleted'", UUID::class.java)
+            .setParameter(1, id).setParameter(2, c.id).resultList.firstOrNull() as UUID?
+            ?: throw ApiException.notFound("в барахолке сообщества такого объявления нет")
+        if (n != me && communities.roleOf(c.id, me) !in setOf("admin", "owner")) {
+            throw ApiException.forbidden("убрать объявление может продавец или админ сообщества")
+        }
+        em.createNativeQuery("update market_item set community_id = null, updated_at = now() where id = ?1").setParameter(1, id).executeUpdate()
     }
 
     @Transactional
@@ -281,12 +322,17 @@ class MarketService(
             select m.id, m.seller_id, m.title, m.description, m.price, m.currency, m.category, m.condition, m.city, m.contacts,
                    m.status, m.views, m.created_at, m.updated_at, m.bumped_at,
                    (select count(*) from market_favorite f where f.item_id = m.id),
-                   exists(select 1 from market_favorite f where f.item_id = m.id and f.user_id = ?2)
+                   exists(select 1 from market_favorite f where f.item_id = m.id and f.user_id = ?2),
+                   m.community_id,
+                   (select cm.role from community_member cm where cm.community_id = m.community_id and cm.user_id = ?2 and cm.left_at is null)
             from market_item m where m.id in (?1) and m.status <> 'deleted'
             """.trimIndent(),
         ).setParameter(1, ids).setParameter(2, me).resultList as List<Array<Any?>>
         val sellers = profiles.shorts(rows.map { it[1] as UUID })
         val photos = attachments.load(AttachmentService.Owner.MARKET, ids)
+        val commIds = rows.mapNotNull { it[17] as UUID? }.distinct()
+        val comms = if (commIds.isEmpty()) emptyMap() else
+            Community.list("id in ?1 and isDeleted = false", commIds).associate { it.id to PostCommunityOut(it.id, it.slug, it.name, it.hue, it.avatar) }
         val byId = rows.associateBy { it[0] as UUID }
         return ids.mapNotNull { id ->
             val r = byId[id] ?: return@mapNotNull null
@@ -314,7 +360,11 @@ class MarketService(
                 cover = pics.firstOrNull()?.url,
                 views = (r[11] as Number).toLong(),
                 favorites = (r[15] as Number).toLong(),
-                my = MyMarketOut(seller == me, r[16] == true),
+                my = MyMarketOut(
+                    seller == me, r[16] == true,
+                    canRemoveFromCommunity = r[17] != null && (seller == me || r[18] in setOf("admin", "owner")),
+                ),
+                community = (r[17] as UUID?)?.let { comms[it] },
                 createdAt = toInstant(r[12]),
                 updatedAt = toInstant(r[13]),
                 bumpedAt = bumpedAt,
@@ -336,6 +386,16 @@ class MarketService(
         return unique.map { media.requireOwned(it, me) }.onEach {
             if (!it.contentType.startsWith("image/")) throw ApiException.badRequest("not_image", "к объявлению — только картинки")
         }
+    }
+
+    /** Сообщество, куда я могу выставить объявление. */
+    private fun marketCommunity(me: UUID, slug: String): Community {
+        val c = communities.bySlug(slug)
+        communities.requireRole(c, me, "member") // зеркало Telegram → mirror_readonly
+        if ("market" !in communities.parseSections(c.sections)) {
+            throw ApiException(403, "market_off", "в этом сообществе нет раздела «Барахолка»")
+        }
+        return c
     }
 
     private fun sellerOf(id: UUID): UUID {

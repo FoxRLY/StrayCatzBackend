@@ -47,6 +47,8 @@ data class VideoOut(
     val tags: List<String> = emptyList(),
     /** Обложку сделал сервер (кадр из видео), а не автор. */
     val posterAuto: Boolean = false,
+    /** Только в умной ленте (?algo=true): почему ролик показан. */
+    val reason: RecommendReasonOut? = null,
 )
 
 data class VideoPageOut(
@@ -58,6 +60,8 @@ data class VideoPageOut(
     val nextBefore: Instant?,
     /** Для sort=popular: следующая страница — ?offset=<nextOffset>. */
     val nextOffset: Int?,
+    /** Умная лента (?algo=true): следующая страница — ?algo=true&cursor=<nextCursor>. */
+    val nextCursor: String? = null,
 )
 
 /** POST /api/video — загрузить ролик прямо в «мои видео» (без записи). */

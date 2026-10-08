@@ -42,6 +42,9 @@ object FrameTypes {
     /** Открыл/закрыл страницу сообщества: { communityId } — сюда летит voice.updated / voice.removed. */
     const val COMMUNITY_OPEN = "community.open"
     const val COMMUNITY_CLOSE = "community.close"
+    /** Слушаю/открыл радио: { stationId } — сюда летит radio.state (смена трека, очередь, слушатели). */
+    const val RADIO_OPEN = "radio.open"
+    const val RADIO_CLOSE = "radio.close"
     /** Поставить / снять реакцию. d = {chatId, messageId, emoji} */
     const val REACTION_ADD = "reaction.add"
     const val REACTION_REMOVE = "reaction.remove"
